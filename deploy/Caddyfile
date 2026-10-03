@@ -1,4 +1,6 @@
 {$DOMAIN} {
-	encode zstd gzip
+	# Don't compress the dashboard's live event stream (SSE), so updates aren't buffered.
+	@compressible not path_regexp ^/api/guilds/[^/]+/events$
+	encode @compressible zstd gzip
 	reverse_proxy bot:3000
 }

@@ -351,9 +351,18 @@ export class ChannelRepo {
     this.db.prepare('UPDATE channels SET last_content_check_at=?, content_seeded=?, updated_at=? WHERE id=?').run(nowIso(), seeded ? 1 : 0, nowIso(), id);
   }
 
-  /** Remove channels no account references anymore. Returns deleted ids. */
+  /**
+   * Remove channels no account references anymore. Channels that appear in past live sessions are kept
+   * (segments cascade from channels, so deleting them would erase that platform from old summaries/history).
+   * Returns deleted ids.
+   */
   deleteOrphans(): number[] {
-    const rows = this.db.prepare('SELECT id FROM channels WHERE id NOT IN (SELECT DISTINCT channel_id FROM streamer_accounts)').all() as Row[];
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM channels WHERE id NOT IN (SELECT DISTINCT channel_id FROM streamer_accounts)
+           AND id NOT IN (SELECT DISTINCT channel_id FROM live_segments)`,
+      )
+      .all() as Row[];
     const ids = rows.map((r) => n(r.id));
     for (const id of ids) this.db.prepare('DELETE FROM channels WHERE id = ?').run(id);
     return ids;

@@ -86,6 +86,18 @@ describe('Repositories', () => {
     expect(repos.channels.get(ch.id)).toBeNull();
   });
 
+  it('keeps orphan channels that are part of session history', () => {
+    const st = repos.streamers.create({ guildId: 'g1', discordUserId: '1', displayName: 'A' });
+    const ch = repos.channels.upsertResolved(resolved('kick', '9'));
+    const account = repos.accounts.create({ streamerId: st.id, channelId: ch.id });
+    const session = repos.sessions.create({ guildId: 'g1', streamerId: st.id, startedAt: new Date().toISOString() });
+    repos.sessions.addSegment({ sessionId: session.id, channelId: ch.id, platform: 'kick', streamId: 's', startedAt: session.startedAt, viewers: 1 });
+    repos.accounts.delete(account.id);
+    expect(repos.channels.deleteOrphans()).toEqual([]);
+    expect(repos.sessions.segments(session.id)).toHaveLength(1);
+    expect(repos.channels.listTracked()).toHaveLength(0);
+  });
+
   it('persists live state and errors on channels', () => {
     const ch = repos.channels.upsertResolved(resolved('twitch', '1'));
     const snap = { ...offlineSnapshot(ch, ch.url), isLive: true, streamId: 's1', viewers: 10 };

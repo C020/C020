@@ -1,0 +1,171 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  --color-twitch: #9146ff;
+  --color-kick: #53fc18;
+  --color-youtube: #ff0000;
+  --color-tiktok: #fe2c55;
+  --color-blurple: #5865f2;
+  --color-live: #f43f5e;
+
+  --color-discord-bg: #313338;
+  --color-discord-embed: #2b2d31;
+  --color-discord-text: #dbdee1;
+  --color-discord-muted: #949ba4;
+  --color-discord-link: #00a8fc;
+  --color-discord-button: #4e5058;
+
+  --animate-fade-in: fade-in 180ms ease-out both;
+  --animate-pop-in: pop-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-slide-in-end: slide-in-end 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-slide-in-start: slide-in-start 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-slide-up: slide-up 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-live-ping: live-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  /* "end" is the left edge in RTL. */
+  @keyframes slide-in-end {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  @keyframes slide-in-start {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes live-ping {
+    75%,
+    100% {
+      transform: scale(2.2);
+      opacity: 0;
+    }
+  }
+  @keyframes shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html,
+  body {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-zinc-950 font-sans text-zinc-100 antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 100% -10%, rgb(124 58 237 / 0.12), transparent 60%),
+      radial-gradient(50rem 35rem at -10% 110%, rgb(88 101 242 / 0.1), transparent 60%);
+    background-attachment: fixed;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: rgb(139 92 246 / 0.4);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(139 92 246 / 0.8);
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+
+  /* Thin, unobtrusive scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(63 63 70) transparent;
+  }
+
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 1ms !important;
+    }
+  }
+}
+
+@utility glass {
+  background-color: rgb(24 24 27 / 0.6);
+  border: 1px solid rgb(255 255 255 / 0.06);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+@utility skeleton {
+  background: linear-gradient(90deg, rgb(39 39 42 / 0.6) 25%, rgb(63 63 70 / 0.6) 50%, rgb(39 39 42 / 0.6) 75%);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

@@ -6,7 +6,7 @@ import { logger } from './core/logger.js';
 import { PLATFORM_LABELS } from './core/types.js';
 import { openDatabase } from './db/database.js';
 import { Repositories } from './db/repositories.js';
-import { DiscordService } from './discord/discordService.js';
+import { DiscordService, DiscordStartupError } from './discord/discordService.js';
 import { Monitor } from './monitor/monitor.js';
 import { ProviderRegistry } from './platforms/registry.js';
 import { AuditService } from './services/audit.js';
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     'Web server listening',
   );
 
-  await discord.start();
+  await connectDiscord(discord);
   await sessions.reconcile().catch((err) => logger.error({ err }, 'Startup reconcile failed'));
   sessions.start();
   monitor.start();
@@ -94,6 +94,25 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+/**
+ * Connects to Discord, retrying transient failures (network, Discord outage) with backoff while the web
+ * server keeps serving webhooks and the dashboard. Configuration errors (bad token, missing intent) are fatal.
+ */
+async function connectDiscord(discord: DiscordService): Promise<void> {
+  let delayMs = 5_000;
+  for (;;) {
+    try {
+      await discord.start();
+      return;
+    } catch (err) {
+      if (err instanceof DiscordStartupError && err.permanent) throw err;
+      logger.error({ err: (err as Error).message, retryInSec: delayMs / 1000 }, 'Discord connection failed, retrying');
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 5 * 60_000);
+    }
+  }
 }
 
 function logProviderSummary(ctx: AppContext): void {

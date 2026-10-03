@@ -15,9 +15,11 @@
     "build:dashboard": "vite build --config dashboard/vite.config.ts",
     "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p dashboard/tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config dashboard/vitest.config.ts",
     "test:watch": "vitest",
-    "secrets": "node scripts/generate-secrets.mjs"
+    "secrets": "node scripts/generate-secrets.mjs",
+    "test:server": "vitest run",
+    "test:dashboard": "vitest run --config dashboard/vitest.config.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
