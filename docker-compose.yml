@@ -1,0 +1,47 @@
+services:
+  bot:
+    build: .
+    image: stream-bot:latest
+    container_name: stream-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/bot.db
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "3000"
+
+  # HTTPS تلقائي (Let's Encrypt) قدام البوت. غيّر DOMAIN في ملف .env
+  caddy:
+    image: caddy:2
+    container_name: stream-bot-caddy
+    restart: unless-stopped
+    depends_on:
+      - bot
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-bot.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # (اختياري) RSSHub محلي كبديل لمقاطع تيك توك:  docker compose --profile rsshub up -d
+  # وبعدها حط في .env:  RSSHUB_URL=http://rsshub:1200
+  rsshub:
+    image: diygod/rsshub:latest
+    container_name: stream-bot-rsshub
+    restart: unless-stopped
+    profiles: ["rsshub"]
+    environment:
+      NODE_ENV: production
+      CACHE_EXPIRE: 600
+    expose:
+      - "1200"
+
+volumes:
+  caddy_data:
+  caddy_config:

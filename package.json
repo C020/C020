@@ -16,7 +16,8 @@
     "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p dashboard/tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "secrets": "node scripts/generate-secrets.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
