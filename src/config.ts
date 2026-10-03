@@ -21,6 +21,12 @@ const csv = z
       .filter(Boolean),
   );
 
+const bool = (def: boolean) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v == null || v.trim() === '' ? def : ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase())));
+
 const seconds = (def: number, min: number) => z.coerce.number().int().min(min).default(def);
 
 const EnvSchema = z.object({
@@ -54,6 +60,12 @@ const EnvSchema = z.object({
   // Kick
   KICK_CLIENT_ID: optionalString,
   KICK_CLIENT_SECRET: optionalString,
+  /**
+   * Kick has no official VOD/clip API. When true, the bot tries Kick's unofficial website endpoints
+   * (plain requests, no Cloudflare circumvention). Off by default: Kick's ToS forbid scraping and a
+   * violation could get the developer app (which live detection depends on) suspended.
+   */
+  KICK_UNOFFICIAL_CONTENT: bool(false),
 
   // YouTube
   YOUTUBE_API_KEY: optionalString,
