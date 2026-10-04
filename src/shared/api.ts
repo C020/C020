@@ -311,9 +311,12 @@ export const TEMPLATE_VARIABLES: Record<'live' | 'summary' | 'content', Array<{ 
     { key: 'platforms', description: 'كل المنصات اللي يبث عليها' },
     { key: 'title', description: 'عنوان البث' },
     { key: 'game', description: 'اللعبة / القسم' },
+    { key: 'category', description: 'القسم (نفس game)' },
     { key: 'viewers', description: 'عدد المشاهدين الحالي (مجموع المنصات)' },
     { key: 'url', description: 'رابط البث الأساسي' },
     { key: 'started', description: 'وقت بداية البث (ديسكورد timestamp)' },
+    { key: 'user', description: 'اسم العضو في ديسكورد' },
+    { key: 'handle', description: 'يوزر الحساب على المنصة الأساسية' },
   ],
   summary: [
     { key: 'name', description: 'اسم الستريمر' },
@@ -324,6 +327,7 @@ export const TEMPLATE_VARIABLES: Record<'live' | 'summary' | 'content', Array<{ 
     { key: 'games', description: 'الألعاب / الأقسام' },
     { key: 'platforms', description: 'المنصات' },
     { key: 'title', description: 'آخر عنوان' },
+    { key: 'user', description: 'اسم العضو في ديسكورد' },
   ],
   content: [
     { key: 'name', description: 'اسم الستريمر' },
@@ -332,5 +336,10 @@ export const TEMPLATE_VARIABLES: Record<'live' | 'summary' | 'content', Array<{ 
     { key: 'kind', description: 'نوع المحتوى (فيديو، شورتس، كليب...)' },
     { key: 'title', description: 'عنوان المقطع' },
     { key: 'url', description: 'رابط المقطع' },
+    { key: 'duration', description: 'مدة المقطع' },
+    { key: 'views', description: 'عدد المشاهدات' },
+    { key: 'channel', description: 'اسم القناة على المنصة' },
+    { key: 'handle', description: 'يوزر الحساب على المنصة' },
+    { key: 'user', description: 'اسم العضو في ديسكورد' },
   ],
 };

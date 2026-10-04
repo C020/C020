@@ -119,6 +119,8 @@ function mapSession(r: Row): LiveSession {
     categories: parseJson<SessionCategory[]>(s(r.categories), []),
     titles: parseJson<string[]>(s(r.titles), []),
     lastMessageUpdate: s(r.last_message_update),
+    summaryPending: b(r.summary_pending),
+    summaryAttempts: n(r.summary_attempts ?? 0),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -347,6 +349,11 @@ export class ChannelRepo {
       .run(message.slice(0, 500), nowIso(), nowIso(), id);
   }
 
+  /** Forget the content baseline so the next content check stores existing items silently again. */
+  resetContentSeed(id: number): void {
+    this.db.prepare('UPDATE channels SET content_seeded = 0, updated_at = ? WHERE id = ?').run(nowIso(), id);
+  }
+
   markContentChecked(id: number, seeded: boolean): void {
     this.db.prepare('UPDATE channels SET last_content_check_at=?, content_seeded=?, updated_at=? WHERE id=?').run(nowIso(), seeded ? 1 : 0, nowIso(), id);
   }
@@ -481,6 +488,11 @@ export class SessionRepo {
     return rows.map(mapSession);
   }
 
+  /** Ended sessions whose summary still has to be published. */
+  listSummaryPending(limit = 50): LiveSession[] {
+    return (this.db.prepare("SELECT * FROM live_sessions WHERE status = 'ended' AND summary_pending = 1 ORDER BY ended_at LIMIT ?").all(limit) as Row[]).map(mapSession);
+  }
+
   listRecent(guildId: string, limit = 50, offset = 0): LiveSession[] {
     return (this.db.prepare('SELECT * FROM live_sessions WHERE guild_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?').all(guildId, limit, offset) as Row[]).map(
       mapSession,
@@ -499,7 +511,7 @@ export class SessionRepo {
     this.db
       .prepare(
         `UPDATE live_sessions SET status=?, started_at=?, ended_at=?, message_channel_id=?, message_id=?, peak_viewers=?, viewer_sum=?, viewer_samples=?,
-           categories=?, titles=?, last_message_update=?, updated_at=? WHERE id=?`,
+           categories=?, titles=?, last_message_update=?, summary_pending=?, summary_attempts=?, updated_at=? WHERE id=?`,
       )
       .run(
         session.status,
@@ -513,6 +525,8 @@ export class SessionRepo {
         JSON.stringify(session.categories),
         JSON.stringify(session.titles),
         session.lastMessageUpdate,
+        session.summaryPending ? 1 : 0,
+        session.summaryAttempts ?? 0,
         nowIso(),
         session.id,
       );

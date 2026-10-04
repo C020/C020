@@ -63,6 +63,26 @@ export interface MessageRef {
   messageId: string;
 }
 
+/**
+ * Outcome of editing an existing live message.
+ * - ok:        edited (or nothing to change)
+ * - gone:      the message/channel no longer exists (deleted, channel removed, wrong guild, not a text channel) → repost
+ * - forbidden: the bot lost access to the channel (403/50001/50013); the message may still exist → keep the ref, retry later
+ * - transient: network/5xx/timeout/client not ready → keep the ref, retry later
+ */
+export type EditOutcome = 'ok' | 'gone' | 'forbidden' | 'transient';
+
+/**
+ * Outcome of publishing a post-stream summary.
+ * - done:      summary is visible (edited in place or posted) at `ref`
+ * - skipped:   nothing to do (old message gone and summaries disabled / no channel configured)
+ * - transient: Discord failed temporarily (or access is missing); the caller must retry later
+ */
+export type SummaryOutcome = { status: 'done'; ref: MessageRef } | { status: 'skipped' } | { status: 'transient'; reason: string };
+
+/** Outcome of a single role change. 'transient' means it should be retried (REST error, Discord not ready). */
+export type RoleChangeOutcome = 'applied' | 'noop' | 'transient' | 'config';
+
 // ───────────────────────────── ports implemented by the Discord layer ─────────────────────────────
 
 export interface Notifier {
@@ -72,12 +92,12 @@ export interface Notifier {
    * Edit an existing live notification. Returns false when the message no longer exists
    * (deleted/unknown channel) so the caller can post a new one.
    */
-  updateLive(ref: MessageRef, view: LiveView): Promise<boolean>;
+  updateLive(ref: MessageRef, view: LiveView): Promise<EditOutcome>;
   /**
    * Turn the live notification into the post-stream summary (edit `ref` when given and still exists,
    * otherwise post a new message when summaries are enabled). Returns the final message ref.
    */
-  postSummary(ref: MessageRef | null, view: SummaryView): Promise<MessageRef | null>;
+  postSummary(ref: MessageRef | null, view: SummaryView): Promise<SummaryOutcome>;
   /** Post a new-content notification. */
   postContent(view: ContentView): Promise<MessageRef | null>;
   /** Mirror an important event to the guild's log channel (no-op when not configured). */
@@ -86,12 +106,19 @@ export interface Notifier {
 
 export interface RoleManager {
   /** Add/remove the "Streaming Now" role. Must never throw (log + audit on failure). */
-  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<void>;
+  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<RoleChangeOutcome>;
   /** Add/remove the "Streamer" role. Must never throw. */
-  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<void>;
+  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<RoleChangeOutcome>;
+  /**
+   * Remove a specific role (e.g. the previous "Streaming Now" role after the admin changed it) from the given
+   * members. Best effort, runs on the guild's role queue, never throws.
+   */
+  removeRoleFrom(guildId: string, roleId: string, userIds: string[], reason: string): Promise<void>;
   /**
    * Make roles match reality for a guild: live role only on members with an active session,
    * streamer role on every registered (enabled) streamer when autoStreamerRole is on.
+   * Never strips roles from members the bot could not have given them to: the live role is only removed
+   * from registered streamers (an admin picking an existing, widely held role must not wipe it from everyone).
    */
   reconcile(guildId: string, liveUserIds: Set<string>, streamerUserIds: Set<string>): Promise<{ added: number; removed: number }>;
 }
@@ -113,6 +140,14 @@ export interface DiscordRoleInfo {
   managed: boolean;
   /** True when the bot can assign it (below the bot's highest role and not managed/@everyone). */
   assignable: boolean;
+  /** Role permission bitfield as a decimal string. */
+  permissions: string;
+  /**
+   * True when the role grants moderation/admin power (Administrator, Manage Server/Roles/Channels/Messages/Webhooks,
+   * Ban/Kick/Moderate Members, Mention Everyone). Such roles must not be used as the Streamer/Streaming Now role,
+   * because the bot would hand them out automatically.
+   */
+  elevated: boolean;
 }
 
 export interface DiscordChannelInfo {

@@ -167,4 +167,13 @@ export const MIGRATIONS: { id: number; name: string; sql: string }[] = [
       );
     `,
   },
+  {
+    id: 2,
+    name: 'summary_pending',
+    sql: /* sql */ `
+      -- 1 while a post-stream summary still has to be published (a Discord failure must not leave the LIVE message up).
+      ALTER TABLE live_sessions ADD COLUMN summary_pending INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE live_sessions ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];

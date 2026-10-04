@@ -172,6 +172,10 @@ export interface LiveSession {
   categories: SessionCategory[];
   titles: string[];
   lastMessageUpdate: string | null;
+  /** True while the post-stream summary still has to be published (retried until it succeeds). */
+  summaryPending: boolean;
+  /** Failed summary publication attempts (drives the retry backoff). */
+  summaryAttempts: number;
   createdAt: string;
   updatedAt: string;
 }
