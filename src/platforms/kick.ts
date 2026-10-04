@@ -76,6 +76,7 @@ const KV_KEYS = {
   publicKey: 'kick:public_key',
   breaker: 'kick:unofficial_breaker',
   streams: 'kick:streams',
+  subscriptions: 'kick:subscriptions',
 } as const;
 
 const MINUTE = 60_000;
@@ -91,6 +92,15 @@ const PUBLIC_KEY_MAX_AGE_MS = 24 * HOUR;
 const PUBLIC_KEY_REFRESH_COOLDOWN_MS = 10 * MINUTE;
 const DEFAULT_WEBHOOK_MAX_SKEW_MS = 5 * MINUTE;
 const WEBHOOK_DEDUPE_SIZE = 5_000;
+/**
+ * GET listings can omit subscriptions that exist (KickDevDocs #419). A subscription we created but the listing
+ * doesn't show is deleted by its stored id and re-created, for at most this many broadcasters per sync, and not
+ * again within the cooldown, so a persistently incomplete listing can't make every sync churn or pile up duplicates.
+ */
+const MAX_RECREATE_PER_SYNC = 10;
+const RECREATE_COOLDOWN_MS = 30 * MINUTE;
+/** Ids whose deletion failed are retried on later syncs; bounded so a broken DELETE can't grow kv forever. */
+const MAX_ORPHAN_SUBSCRIPTIONS = 500;
 /** Two observations whose start times differ by less than this belong to the same broadcast. */
 const SAME_STREAM_TOLERANCE_MS = 2 * MINUTE;
 /** A VOD whose start time is this close to a tracked stream's start is that stream's recording. */
@@ -933,6 +943,35 @@ interface SyncReport {
   errors: string[];
 }
 
+interface StoredBroadcasterSubs {
+  /** eventKey(name, version) -> subscription id. */
+  ids: Record<string, string>;
+  /** Last time we POSTed subscriptions for this broadcaster (drives the re-creation cooldown and fairness). */
+  postedAt?: number;
+}
+
+/** Subscription ids we created or saw listed, so they can be deleted even when a listing omits them (#419). */
+interface SubscriptionLedger {
+  subs: Record<string, StoredBroadcasterSubs>;
+  /** Ids we want gone but could not delete yet. */
+  orphans: string[];
+}
+
+function readSubscriptionLedger(raw: unknown): SubscriptionLedger {
+  const ledger: SubscriptionLedger = { subs: {}, orphans: [] };
+  if (!isRecord(raw)) return ledger;
+  if (isRecord(raw.subs)) {
+    for (const [broadcaster, entry] of Object.entries(raw.subs)) {
+      if (!isRecord(entry) || !isRecord(entry.ids)) continue;
+      const ids: Record<string, string> = {};
+      for (const [key, id] of Object.entries(entry.ids)) if (typeof id === 'string' && id) ids[key] = id;
+      ledger.subs[broadcaster] = { ids, ...(typeof entry.postedAt === 'number' ? { postedAt: entry.postedAt } : {}) };
+    }
+  }
+  if (Array.isArray(raw.orphans)) ledger.orphans = raw.orphans.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return ledger;
+}
+
 interface KickWebhookDeps {
   api: HttpClient;
   kv: SafeKv;
@@ -1046,7 +1085,7 @@ class KickWebhookAdapter implements WebhookAdapter {
   }
 
   private async doSync(channels: ChannelRef[]): Promise<void> {
-    const { api, logger } = this.deps;
+    const { api, logger, kv } = this.deps;
     await this.keyring.warmUp().catch(() => undefined);
 
     const desired = new Set<string>();
@@ -1067,8 +1106,9 @@ class KickWebhookAdapter implements WebhookAdapter {
       return;
     }
 
-    const have = new Map<string, Set<string>>();
-    const stale: string[] = [];
+    // broadcaster -> eventKey -> listed subscription id
+    const have = new Map<string, Map<string, string>>();
+    const stale = new Set<string>();
     for (const sub of existing) {
       const name = str(sub.event);
       const subId = str(sub.id);
@@ -1076,20 +1116,86 @@ class KickWebhookAdapter implements WebhookAdapter {
       if (sub.method && sub.method !== 'webhook') continue;
       const broadcaster = idString(sub.broadcaster_user_id);
       const key = eventKey(name, sub.version ?? '');
-      const owned = broadcaster ? (have.get(broadcaster) ?? new Set<string>()) : null;
+      const owned = broadcaster ? (have.get(broadcaster) ?? new Map<string, string>()) : null;
       if (!broadcaster || !owned || !desired.has(broadcaster) || !MANAGED_EVENT_KEYS.has(key) || owned.has(key)) {
-        stale.push(subId);
+        stale.add(subId);
         continue;
       }
-      owned.add(key);
+      owned.set(key, subId);
       have.set(broadcaster, owned);
     }
 
-    const report: SyncReport = { at: this.deps.now(), tracked: desired.size, created: 0, deleted: 0, errors: [] };
+    // Reconcile with the ids we stored: the listing is not trusted to be complete (#419).
+    const ledger = readSubscriptionLedger(kv.get(KV_KEYS.subscriptions));
+    const next: SubscriptionLedger = { subs: {}, orphans: [] };
+    const remember = (broadcaster: string): StoredBroadcasterSubs => {
+      let entry = next.subs[broadcaster];
+      if (!entry) {
+        const postedAt = ledger.subs[broadcaster]?.postedAt;
+        entry = { ids: {}, ...(postedAt !== undefined ? { postedAt } : {}) };
+        next.subs[broadcaster] = entry;
+      }
+      return entry;
+    };
+    for (const [broadcaster, listed] of have) Object.assign(remember(broadcaster).ids, Object.fromEntries(listed));
+    const listedIds = new Set([...have.values()].flatMap((listed) => [...listed.values()]));
+    for (const id of ledger.orphans) if (!listedIds.has(id)) stale.add(id);
+    /** broadcaster -> eventKey -> stored id the listing omits */
+    const hidden = new Map<string, Map<string, string>>();
+    for (const [broadcaster, entry] of Object.entries(ledger.subs)) {
+      for (const [key, id] of Object.entries(entry.ids)) {
+        const listedId = have.get(broadcaster)?.get(key);
+        if (listedId === id) continue;
+        // Removed streamer, superseded event version, or a hidden duplicate of a listed subscription.
+        if (!desired.has(broadcaster) || !MANAGED_EVENT_KEYS.has(key) || listedId) {
+          stale.add(id);
+          continue;
+        }
+        const map = hidden.get(broadcaster) ?? new Map<string, string>();
+        map.set(key, id);
+        hidden.set(broadcaster, map);
+      }
+    }
+
+    const now = this.deps.now();
+    const report: SyncReport = { at: now, tracked: desired.size, created: 0, deleted: 0, errors: [] };
+
+    // Re-create hidden subscriptions (delete the stored id first), capped and least-recently-posted first.
+    const recreate = [...hidden.keys()]
+      .filter((broadcaster) => now - (ledger.subs[broadcaster]?.postedAt ?? 0) >= RECREATE_COOLDOWN_MS)
+      .sort((a, b) => (ledger.subs[a]?.postedAt ?? 0) - (ledger.subs[b]?.postedAt ?? 0))
+      .slice(0, MAX_RECREATE_PER_SYNC);
+    const cleared = new Set<string>();
+    if (hidden.size > 0) {
+      logger.warn(
+        { broadcasters: hidden.size, recreating: recreate.length, sample: [...hidden.keys()].slice(0, 5) },
+        'Kick subscription listing omits subscriptions we created (#419); deleting and re-creating them',
+      );
+    }
+    await forEachLimit(recreate, 4, async (broadcaster) => {
+      const ids = [...hidden.get(broadcaster)!.values()];
+      try {
+        await api.request(`${API_BASE}/events/subscriptions`, { method: 'DELETE', query: { id: ids }, retries: 1, allow404: true });
+        cleared.add(broadcaster);
+      } catch (err) {
+        report.errors.push(`delete ${broadcaster}: ${errorMessage(err)}`);
+        logger.warn({ broadcaster, err: errorMessage(err) }, 'Failed to delete hidden Kick subscriptions; not re-creating them yet');
+      }
+    });
+    // Hidden ids that were not cleared stay remembered (and are not re-POSTed) until a later sync.
+    for (const [broadcaster, ids] of hidden) {
+      if (cleared.has(broadcaster)) continue;
+      Object.assign(remember(broadcaster).ids, Object.fromEntries(ids));
+    }
+
     const missing = [...desired]
       .map((broadcaster) => ({
         broadcaster,
-        events: MANAGED_EVENTS.filter((e) => !have.get(broadcaster)?.has(eventKey(e.name, e.version))),
+        events: MANAGED_EVENTS.filter((e) => {
+          const key = eventKey(e.name, e.version);
+          if (have.get(broadcaster)?.has(key)) return false;
+          return !hidden.get(broadcaster)?.has(key) || cleared.has(broadcaster);
+        }),
       }))
       .filter((m) => m.events.length > 0);
 
@@ -1104,13 +1210,18 @@ class KickWebhookAdapter implements WebhookAdapter {
           },
           retries: 1,
         });
+        const entry = remember(broadcaster);
+        entry.postedAt = now;
         for (const result of asArray<KickSubscriptionResult>(res.data?.data).filter(isRecord)) {
           if (str(result.error)) {
             report.errors.push(`${broadcaster}/${result.name ?? '?'}: ${result.error}`);
             logger.warn({ broadcaster, event: result.name, error: result.error }, 'Kick refused event subscription');
-          } else {
-            report.created++;
+            continue;
           }
+          report.created++;
+          const subId = str(result.subscription_id);
+          const requested = events.find((e) => e.name === result.name);
+          if (subId && requested) entry.ids[eventKey(requested.name, typeof result.version === 'number' ? result.version : requested.version)] = subId;
         }
       } catch (err) {
         report.errors.push(`${broadcaster}: ${errorMessage(err)}`);
@@ -1118,15 +1229,19 @@ class KickWebhookAdapter implements WebhookAdapter {
       }
     });
 
-    for (const ids of chunk(stale, CHANNELS_BATCH_SIZE)) {
+    for (const ids of chunk([...stale], CHANNELS_BATCH_SIZE)) {
       try {
-        await api.request(`${API_BASE}/events/subscriptions`, { method: 'DELETE', query: { id: ids }, retries: 1 });
+        // 404 means the subscription is already gone, which is what we want.
+        await api.request(`${API_BASE}/events/subscriptions`, { method: 'DELETE', query: { id: ids }, retries: 1, allow404: true });
         report.deleted += ids.length;
       } catch (err) {
+        next.orphans.push(...ids);
         report.errors.push(`delete: ${errorMessage(err)}`);
         logger.warn({ count: ids.length, err: errorMessage(err) }, 'Failed to delete stale Kick event subscriptions');
       }
     }
+    next.orphans = next.orphans.slice(-MAX_ORPHAN_SUBSCRIPTIONS);
+    kv.set(KV_KEYS.subscriptions, next);
 
     this.lastSync = report;
     this.lastSyncError = null;
@@ -1442,18 +1557,22 @@ export class KickProvider implements PlatformProvider {
     return items.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
   }
 
+  /**
+   * Without the unofficial website API the generic videos page is the best we can do (retrying is pointless).
+   * With it, null means "recording not found yet" so the session service retries later (Kick lists recordings
+   * late, and the website may be challenging us); the generic page would otherwise be stored as the VOD.
+   */
   async findVodUrl(channel: ChannelRef, streamId: string | null, startedAt: string | null): Promise<string | null> {
-    const fallback = `${channelUrl(this.slugFor(channel))}/videos`;
-    if (!this.unofficialContent) return fallback;
+    if (!this.unofficialContent) return `${channelUrl(this.slugFor(channel))}/videos`;
     try {
       const listing = await this.loadVideos(channel);
-      if (listing.status !== 'ok') return fallback;
+      if (listing.status !== 'ok') return null;
       const target = parseKickDate(startedAt) ?? (streamId ? this.ledger.find(channel.platformId, streamId)?.startedAt : undefined) ?? null;
       const match = pickVod(listing.value.videos, streamId, target);
-      return match ? `${channelUrl(listing.value.slug)}/videos/${match}` : `${channelUrl(listing.value.slug)}/videos`;
+      return match ? `${channelUrl(listing.value.slug)}/videos/${match}` : null;
     } catch (err) {
       this.logger.debug({ platformId: channel.platformId, err: errorMessage(err) }, 'Kick VOD lookup failed');
-      return fallback;
+      return null;
     }
   }
 

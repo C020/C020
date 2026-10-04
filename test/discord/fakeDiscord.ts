@@ -12,7 +12,13 @@ export class FakeRole {
     public position: number,
     public managed = false,
     public mentionable = true,
+    /** Role-level permission bitfield (what the role grants guild-wide). */
+    public permissionBits = 0n,
   ) {}
+
+  get permissions(): { bitfield: bigint } {
+    return { bitfield: this.permissionBits };
+  }
 
   get members(): Collection<string, FakeMember> {
     return this.guild.members.cache.filter((m) => m.roles.cache.has(this.id));
@@ -193,8 +199,8 @@ export class FakeGuild {
     return null;
   }
 
-  addRole(id: string, name: string, position: number, extra: { managed?: boolean; mentionable?: boolean } = {}): FakeRole {
-    const role = new FakeRole(this, id, name, position, extra.managed, extra.mentionable);
+  addRole(id: string, name: string, position: number, extra: { managed?: boolean; mentionable?: boolean; permissions?: bigint } = {}): FakeRole {
+    const role = new FakeRole(this, id, name, position, extra.managed, extra.mentionable, extra.permissions);
     this.roles.cache.set(id, role);
     return role;
   }

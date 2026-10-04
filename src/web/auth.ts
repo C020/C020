@@ -22,6 +22,11 @@ const STATE_TTL_SEC = 10 * 60;
 const DEFAULT_GUILD_REFRESH_MS = 10 * 60 * 1000;
 /** Back-off after a failed guild refresh so a dashboard burst does not hammer Discord. */
 const REFRESH_RETRY_MS = 60 * 1000;
+/**
+ * Cached guild permissions older than this are not trusted (Discord kept failing to refresh them):
+ * a user who lost Manage Server must not keep access just because Discord was unreachable.
+ */
+const MAX_GUILD_STALENESS_MS = 60 * 60 * 1000;
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
 
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: 60_000 };
@@ -42,7 +47,7 @@ export class AuthService {
   private readonly guildRefreshMs: number;
   private readonly log: Logger;
   private readonly secret: string;
-  private readonly refreshes = new Map<string, Promise<WebSession>>();
+  private readonly refreshes = new Map<string, Promise<WebSession | null>>();
   private readonly refreshBlockedUntil = new Map<string, number>();
 
   constructor(deps: AuthServiceDeps) {
@@ -116,16 +121,22 @@ export class AuthService {
 
   /**
    * Refreshes the cached guild list from Discord when it is older than the refresh interval.
-   * Concurrent requests share one refresh; failures keep the cached list (and back off).
+   * Concurrent requests share one refresh. Transient failures keep the cached list (and back off) until it is too
+   * old to trust; a rejected token ends the session (returns null → 401, the user logs in again).
    */
-  async ensureFreshGuilds(session: WebSession): Promise<WebSession> {
-    if (!session.accessToken) return session;
+  async ensureFreshGuilds(session: WebSession): Promise<WebSession | null> {
+    if (!session.accessToken) {
+      // Nothing to refresh with: once the cached permissions are too old, the user has to log in again.
+      if (this.guildsTrusted(session)) return session;
+      this.endSession(session);
+      return null;
+    }
     const nowMs = this.now();
     const refreshedAt = Date.parse(session.guildsRefreshedAt);
     if (Number.isFinite(refreshedAt) && nowMs - refreshedAt < this.guildRefreshMs) return session;
     if ((this.refreshBlockedUntil.get(session.id) ?? 0) > nowMs) return session;
 
-    let pending = this.refreshes.get(session.id);
+    let pending: Promise<WebSession | null> | undefined = this.refreshes.get(session.id);
     if (!pending) {
       pending = this.refreshGuilds(session).finally(() => this.refreshes.delete(session.id));
       this.refreshes.set(session.id, pending);
@@ -133,26 +144,48 @@ export class AuthService {
     return pending;
   }
 
-  private async refreshGuilds(session: WebSession): Promise<WebSession> {
+  private async refreshGuilds(session: WebSession): Promise<WebSession | null> {
     try {
       const guilds = toSessionGuilds(await this.oauth.fetchGuilds(session.accessToken!));
       this.ctx.repos.webSessions.updateGuilds(session.id, guilds);
       this.refreshBlockedUntil.delete(session.id);
       return { ...session, guilds, guildsRefreshedAt: new Date(this.now()).toISOString() };
     } catch (err) {
+      if (err instanceof DiscordOAuthError && err.kind === 'unauthorized') {
+        // Token revoked (e.g. the user deauthorized the app): the cached permissions can no longer be re-checked,
+        // so fail closed instead of trusting them for the rest of the session.
+        this.log.info({ userId: session.userId }, 'Discord rejected the dashboard access token; ending the session');
+        this.endSession(session);
+        return null;
+      }
       const retryMs =
         err instanceof DiscordOAuthError && err.kind === 'rate_limited'
           ? Math.max(err.retryAfterMs ?? REFRESH_RETRY_MS, REFRESH_RETRY_MS)
-          : err instanceof DiscordOAuthError && err.kind === 'unauthorized'
-            ? this.guildRefreshMs // token revoked/expired: keep the cached list until the session ends
-            : REFRESH_RETRY_MS;
+          : REFRESH_RETRY_MS;
       this.refreshBlockedUntil.set(session.id, this.now() + retryMs);
-      this.log.warn({ err, userId: session.userId }, 'Refreshing Discord guild list failed; using cached permissions');
+      this.log.warn({ err, userId: session.userId }, 'Refreshing Discord guild list failed; using cached permissions for now');
       return session;
     }
   }
 
+  /** Deletes a session that can no longer be trusted (no token revocation: Discord already rejected it). */
+  private endSession(session: WebSession): void {
+    this.ctx.repos.webSessions.delete(session.id);
+    this.refreshBlockedUntil.delete(session.id);
+  }
+
   // ───────────────────────────── authorization ─────────────────────────────
+
+  /** False once the cached guild permissions are too old to rely on (see MAX_GUILD_STALENESS_MS). */
+  guildsTrusted(session: WebSession): boolean {
+    const refreshedAt = Date.parse(session.guildsRefreshedAt);
+    return Number.isFinite(refreshedAt) && this.now() - refreshedAt <= MAX_GUILD_STALENESS_MS;
+  }
+
+  /** Guilds Discord says the user can manage; empty while the cached list is too old to trust. */
+  private manageableGuilds(auth: AuthState): WebSessionGuild[] {
+    return this.guildsTrusted(auth.session) ? auth.session.guilds.filter(canManageGuild) : [];
+  }
 
   /** Guilds the user can manage AND the bot is in (admins: every bot guild), sorted by name. */
   accessibleGuilds(auth: AuthState): DiscordGuildInfo[] {
@@ -160,22 +193,43 @@ export class AuthService {
     const visible = auth.isAdmin
       ? botGuilds
       : (() => {
-          const manageable = new Set(auth.session.guilds.filter(canManageGuild).map((g) => g.id));
+          const manageable = new Set(this.manageableGuilds(auth).map((g) => g.id));
           return botGuilds.filter((g) => manageable.has(g.id));
         })();
     return [...visible].sort((a, b) => a.name.localeCompare(b.name, 'ar'));
   }
 
-  /** Throws 403 (or 503 while Discord is connecting) unless the user may manage the guild. */
+  /** Permission check only (no bot-guild lookup): admin, or owner/Administrator/Manage Server per fresh-enough data. */
+  canAccessGuild(auth: AuthState, guildId: string): boolean {
+    return auth.isAdmin || this.manageableGuilds(auth).some((g) => g.id === guildId);
+  }
+
+  /** Throws 403 (or 503 while Discord is connecting / permissions cannot be re-checked) unless the user may manage the guild. */
   assertGuildAccess(auth: AuthState, guildId: string): DiscordGuildInfo {
-    const allowed = auth.isAdmin || auth.session.guilds.some((g) => g.id === guildId && canManageGuild(g));
-    if (!allowed) throw forbidden('ما عندك صلاحية على هذا السيرفر (لازم تكون صاحب السيرفر أو عندك Manage Server)');
+    if (!this.canAccessGuild(auth, guildId)) {
+      const cachedAllowed = auth.session.guilds.some((g) => g.id === guildId && canManageGuild(g));
+      if (cachedAllowed && !this.guildsTrusted(auth.session)) throw permissionsUnverified();
+      throw forbidden('ما عندك صلاحية على هذا السيرفر (لازم تكون صاحب السيرفر أو عندك Manage Server)');
+    }
     const guild = safeGuild(this.ctx, guildId, this.log);
     if (!guild) {
       if (!this.ctx.discord.isReady()) throw discordUnavailable();
       throw forbidden('البوت مو موجود في هذا السيرفر، ادعه أول');
     }
     return guild;
+  }
+
+  /**
+   * Account-level features (platform lookups, system status) are for admins and users who manage at least one
+   * guild the bot is in; any other Discord account that completes the login gets 403.
+   */
+  assertAnyGuildAccess(auth: AuthState): void {
+    if (auth.isAdmin || this.accessibleGuilds(auth).length > 0) return;
+    if (auth.session.guilds.some(canManageGuild)) {
+      if (!this.guildsTrusted(auth.session)) throw permissionsUnverified();
+      if (!safeReady(this.ctx)) throw discordUnavailable();
+    }
+    throw forbidden('هذي الميزة لمشرفي السيرفرات اللي فيها البوت (صاحب السيرفر أو عنده Manage Server)');
   }
 
   cookieBase(): { httpOnly: true; secure: boolean; sameSite: 'lax' } {
@@ -196,6 +250,23 @@ export function toSessionGuilds(guilds: DiscordPartialGuild[]): WebSessionGuild[
   return guilds
     .map((g) => ({ id: g.id, name: g.name, icon: g.icon ?? null, owner: g.owner === true, permissions: String(g.permissions ?? '0') }))
     .filter(canManageGuild);
+}
+
+const permissionsUnverified = (): HttpError =>
+  new HttpError(
+    503,
+    'permissions_unverified',
+    'ما قدرنا نتأكد من صلاحياتك في ديسكورد من فترة، جرّب بعد شوي (وإذا تكرر سجّل خروج وادخل من جديد)',
+    undefined,
+    { 'retry-after': '60' },
+  );
+
+function safeReady(ctx: AppContext): boolean {
+  try {
+    return ctx.discord.isReady();
+  } catch {
+    return false;
+  }
 }
 
 function safeGuilds(ctx: AppContext, log: Logger): DiscordGuildInfo[] {

@@ -1,7 +1,8 @@
 /**
  * Server-Sent Events for the dashboard (GET /api/guilds/:guildId/events).
  * Each connection subscribes to the app event bus, filtered to its guild, with a heartbeat that also
- * re-validates the web session so a logged-out tab stops receiving data.
+ * re-validates the web session and the user's access to the guild, so a logged-out, expired or demoted
+ * user's open tab stops receiving data.
  */
 import { PassThrough } from 'node:stream';
 import type { FastifyReply } from 'fastify';
@@ -20,8 +21,8 @@ const MAX_CONNECTIONS = 150;
 export interface SseHubOptions {
   heartbeatMs?: number;
   maxPerSession?: number;
-  /** Re-checks the session on every heartbeat; return false to close the stream. */
-  isSessionValid?: (sessionId: string) => boolean;
+  /** Re-checks the session and its access to the guild on every heartbeat; false (or a throw) closes the stream. */
+  isSessionValid?: (sessionId: string, guildId: string) => boolean | Promise<boolean>;
 }
 
 interface Connection {
@@ -33,7 +34,7 @@ export class SseHub {
   private readonly connections = new Set<Connection>();
   private readonly heartbeatMs: number;
   private readonly maxPerSession: number;
-  private readonly isSessionValid: (sessionId: string) => boolean;
+  private readonly isSessionValid: (sessionId: string, guildId: string) => boolean | Promise<boolean>;
 
   constructor(
     private readonly ctx: AppContext,
@@ -72,13 +73,26 @@ export class SseHub {
       }
     };
 
-    const heartbeat = setInterval(() => {
-      if (!this.isSessionValid(sessionId)) {
+    let checking = false;
+    const beat = async (): Promise<void> => {
+      if (checking || closed) return;
+      checking = true;
+      let valid: boolean;
+      try {
+        valid = await this.isSessionValid(sessionId, guildId);
+      } catch (err) {
+        log.warn({ err, guildId }, 'SSE session check failed; closing the stream');
+        valid = false;
+      } finally {
+        checking = false;
+      }
+      if (!valid) {
         close();
         return;
       }
       send('ping', { t: Date.now() });
-    }, this.heartbeatMs);
+    };
+    const heartbeat = setInterval(() => void beat(), this.heartbeatMs);
     heartbeat.unref();
 
     /** Graceful close flushes what is buffered; a hard close drops a stalled connection immediately. */

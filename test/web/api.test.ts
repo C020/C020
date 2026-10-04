@@ -3,7 +3,7 @@ import { ChannelNotFoundError, ProviderError, ProviderNotConfiguredError, RateLi
 import type { LiveSnapshot, ResolvedChannel } from '../../src/core/types.js';
 import type { SummaryView } from '../../src/services/ports.js';
 import type { WebServer } from '../../src/web/server.js';
-import { CHANNEL_A, createEnv, FakeProviders, fakeProvider, GUILD, login, MEMBER, OTHER_GUILD, ROLE_A, ROLE_B, startServer, type Login, type TestEnv } from './helpers.js';
+import { ADMIN, CHANNEL_A, createEnv, FakeProviders, fakeProvider, GUILD, login, MEMBER, OTHER_GUILD, ROLE_A, ROLE_B, startServer, type Login, type TestEnv } from './helpers.js';
 
 let server: WebServer | null = null;
 afterEach(async () => {
@@ -528,8 +528,10 @@ describe('tools and system', () => {
     const providers = new FakeProviders({ kick: fakeProvider('kick', { configured: false, notes: ['KICK_CLIENT_ID ناقص'] }) });
     const env = createEnv({}, providers);
     env.monitor.runtime = [{ platform: 'twitch', trackedChannels: 5, liveChannels: 2, lastSuccessAt: '2026-10-03T00:00:00.000Z', lastError: null, consecutiveErrors: 0 }];
-    const { s, auth } = await setup(env);
-    const res = await s.app.inject({ method: 'GET', url: '/api/system', headers: auth.headers });
+    const { s } = await setup(env);
+    // Full provider details are for bot admins (guild managers get a redacted view, see security-access.test.ts).
+    const admin = login(env, ADMIN, []);
+    const res = await s.app.inject({ method: 'GET', url: '/api/system', headers: admin.headers });
     const body = res.json();
     expect(body).toMatchObject({ version: '1.2.3', webhooksEnabled: true, publicUrl: 'https://bot.example.com' });
     expect(body.uptimeSec).toBeGreaterThanOrEqual(89);

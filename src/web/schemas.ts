@@ -182,4 +182,17 @@ export const resolveSchema = z.object({ platform: platformSchema, input: z.strin
 
 const messageType = z.enum(['live', 'summary', 'content'], { error: 'نوع الرسالة غير معروف' });
 export const testSchema = z.object({ type: messageType });
-export const previewSchema = z.object({ type: messageType, template: templateSpecSchema.optional() });
+
+/**
+ * Preview overrides are the editor's draft as-is: an empty string means "render this part empty" (e.g. message text
+ * cleared), not "fall back to the saved template" as it does when saving.
+ */
+const previewText = (max: number) => z.string().max(max).optional();
+export const previewTemplateSpecSchema = z.object({
+  content: previewText(2000),
+  title: previewText(256),
+  description: previewText(4096),
+  footer: previewText(2048),
+  color: color.nullable().optional(),
+});
+export const previewSchema = z.object({ type: messageType, template: previewTemplateSpecSchema.optional() });

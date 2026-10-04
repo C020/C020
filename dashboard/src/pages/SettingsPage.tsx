@@ -237,7 +237,7 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
         </div>
       </Section>
 
-      <Section id="channels" icon={<Hash className="size-[18px]" />} title="الرومات" description="وين تنرسل الإشعارات. البوت يحتاج صلاحية View Channel و Send Messages و Embed Links.">
+      <Section id="channels" icon={<Hash className="size-[18px]" />} title="الرومات" description="وين تنرسل الإشعارات. البوت يحتاج صلاحية View Channel و Send Messages و Embed Links، و Attach Files لصور تيك توك.">
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
           <Field label="روم إشعارات البث" htmlFor="field-liveChannelId" hint="إشعار البث المباشر والملخص بعده." error={fieldError('liveChannelId')}>
             <ChannelPicker id="field-liveChannelId" channels={channels} value={draft.liveChannelId} onChange={(v) => set('liveChannelId', v)} invalid={!!fieldError('liveChannelId')} {...pickerCommon} />

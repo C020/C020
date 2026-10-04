@@ -29,7 +29,13 @@ export async function apiPlugin(api: FastifyInstance, deps: ApiDeps): Promise<vo
     if (isMutating(request.method) && !deps.auth.verifyCsrf(session.id, request.headers[CSRF_HEADER])) {
       throw new HttpError(403, 'csrf', 'انتهت صلاحية الصفحة، حدّثها وجرّب مرة ثانية');
     }
-    request.auth = deps.auth.authState(await deps.auth.ensureFreshGuilds(session));
+    const fresh = await deps.auth.ensureFreshGuilds(session);
+    if (!fresh) {
+      // Discord rejected the token (e.g. the app was deauthorized): the session was ended, log in again.
+      deps.auth.clearSessionCookie(reply);
+      throw unauthorized();
+    }
+    request.auth = deps.auth.authState(fresh);
     return payload;
   });
 

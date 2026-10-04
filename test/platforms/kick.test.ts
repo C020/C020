@@ -719,13 +719,17 @@ describe('findVodUrl', () => {
     expect(server.callsTo(VIDEOS)).toHaveLength(1);
   });
 
-  it('falls back to the videos page when nothing matches or the website is blocked', async () => {
+  it('returns null (so the lookup is retried later) when nothing matches or the website is blocked', async () => {
     server.on('GET', VIDEOS, () => json(videoList()));
-    expect(await makeProvider().findVodUrl(channel('668', 'xqc'), null, '2026-01-01T00:00:00Z')).toBe('https://kick.com/xqc/videos');
+    expect(await makeProvider().findVodUrl(channel('668', 'xqc'), null, '2026-01-01T00:00:00Z')).toBeNull();
 
     server.on('GET', VIDEOS, () => challengePage());
     kv = new MemoryKv();
-    expect(await makeProvider().findVodUrl(channel('668', 'xqc'), null, '2026-10-02T18:00:00Z')).toBe('https://kick.com/xqc/videos');
+    expect(await makeProvider().findVodUrl(channel('668', 'xqc'), null, '2026-10-02T18:00:00Z')).toBeNull();
+
+    server.on('GET', VIDEOS, () => new Response('boom', { status: 500 }));
+    kv = new MemoryKv();
+    expect(await makeProvider().findVodUrl(channel('668', 'xqc'), null, '2026-10-02T18:00:00Z')).toBeNull();
   });
 });
 
@@ -950,6 +954,134 @@ describe('webhook sync', () => {
     );
     await makeProvider({ env: webhookEnv }).webhook!.sync([channel('100', 'a')]);
     expect(server.calls.filter((c) => c.url.href.startsWith(SUBS) && c.method !== 'GET')).toHaveLength(0);
+  });
+
+  /** POST handler that hands out unique subscription ids and records what it created. */
+  function creatingPosts(): string[] {
+    const created: string[] = [];
+    server.on('POST', SUBS, (call) => {
+      const body = JSON.parse(call.body ?? '{}') as { broadcaster_user_id: number; events: Array<{ name: string; version: number }> };
+      return json({
+        data: body.events.map((e) => {
+          const id = `sub-${body.broadcaster_user_id}-${e.name.split('.')[1]}-${created.length}`;
+          created.push(id);
+          return { name: e.name, version: e.version, subscription_id: id };
+        }),
+      });
+    });
+    return created;
+  }
+  const subCalls = () => server.calls.filter((c) => c.url.href.split('?')[0] === SUBS && c.method !== 'GET');
+  const postedFor = () => subCalls().filter((c) => c.method === 'POST').map((c) => (JSON.parse(c.body ?? '{}') as { broadcaster_user_id: number }).broadcaster_user_id);
+  const deletedIds = () => subCalls().filter((c) => c.method === 'DELETE').flatMap((c) => c.url.searchParams.getAll('id'));
+
+  it('deletes the stored ids before re-creating subscriptions the listing omits (#419)', async () => {
+    server.on('GET', SUBS, () => json({ data: [] }));
+    server.on('DELETE', SUBS, () => new Response(null, { status: 204 }));
+    const created = creatingPosts();
+    const provider = makeProvider({ env: webhookEnv });
+
+    await provider.webhook!.sync([channel('100', 'a')]);
+    expect(created).toEqual(['sub-100-status-0', 'sub-100-metadata-1']);
+    expect(kv.get('kick:subscriptions')).toMatchObject({
+      subs: { '100': { ids: { 'livestream.status.updated@1': 'sub-100-status-0', 'livestream.metadata.updated@1': 'sub-100-metadata-1' } } },
+    });
+
+    // The next sync's listing still omits them: delete what we created first, then subscribe again.
+    server.calls.length = 0;
+    clock += 60 * 60_000;
+    await provider.webhook!.sync([channel('100', 'a')]);
+    const calls = subCalls();
+    expect(calls.map((c) => c.method)).toEqual(['DELETE', 'POST']);
+    expect(deletedIds()).toEqual(['sub-100-status-0', 'sub-100-metadata-1']);
+    expect(kv.get('kick:subscriptions')).toMatchObject({
+      subs: { '100': { ids: { 'livestream.status.updated@1': 'sub-100-status-2', 'livestream.metadata.updated@1': 'sub-100-metadata-3' } } },
+    });
+
+    // Once the listing shows them, nothing changes; a stored id that differs from the listed one is a hidden duplicate.
+    server.calls.length = 0;
+    server.on('GET', SUBS, () =>
+      json({
+        data: [
+          { id: 'sub-100-status-2', broadcaster_user_id: 100, event: 'livestream.status.updated', version: 1, method: 'webhook' },
+          { id: 'listed-meta', broadcaster_user_id: 100, event: 'livestream.metadata.updated', version: 1, method: 'webhook' },
+        ],
+      }),
+    );
+    await provider.webhook!.sync([channel('100', 'a')]);
+    expect(postedFor()).toEqual([]);
+    expect(deletedIds()).toEqual(['sub-100-metadata-3']);
+  });
+
+  it('deletes the stored subscriptions of a removed streamer even when the listing omits them', async () => {
+    server.on('GET', SUBS, () => json({ data: [] }));
+    server.on('DELETE', SUBS, () => new Response(null, { status: 404 }));
+    creatingPosts();
+    const provider = makeProvider({ env: webhookEnv });
+    await provider.webhook!.sync([channel('100', 'a'), channel('200', 'b')]);
+
+    server.calls.length = 0;
+    await provider.webhook!.sync([channel('200', 'b')]);
+
+    expect(deletedIds()).toEqual(expect.arrayContaining(['sub-100-status-0', 'sub-100-metadata-1']));
+    expect(deletedIds()).not.toContain('sub-200-status-2');
+    // A 404 means it is already gone: forgotten, not retried.
+    expect(kv.get<{ subs: Record<string, unknown>; orphans: string[] }>('kick:subscriptions')?.subs['100']).toBeUndefined();
+    expect(kv.get<{ orphans: string[] }>('kick:subscriptions')?.orphans).toEqual([]);
+  });
+
+  it('caps re-creations per sync, rotates through the rest and respects the cooldown', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => String(1000 + i));
+    kv.set('kick:subscriptions', {
+      subs: Object.fromEntries(ids.map((id) => [id, { ids: { 'livestream.status.updated@1': `old-${id}-s`, 'livestream.metadata.updated@1': `old-${id}-m` } }])),
+      orphans: [],
+    });
+    server.on('GET', SUBS, () => json({ data: [] }));
+    server.on('DELETE', SUBS, () => new Response(null, { status: 204 }));
+    creatingPosts();
+    const provider = makeProvider({ env: webhookEnv });
+    const channels = ids.map((id) => channel(id, `c${id}`));
+
+    await provider.webhook!.sync(channels);
+    expect(postedFor()).toHaveLength(10);
+    expect(deletedIds()).toHaveLength(20);
+    const first = new Set(postedFor());
+
+    server.calls.length = 0;
+    clock += 60_000;
+    await provider.webhook!.sync(channels);
+    expect(postedFor()).toHaveLength(2);
+    expect(postedFor().some((id) => first.has(id))).toBe(false);
+
+    // Everything was re-created within the cooldown: no churn until it passes.
+    server.calls.length = 0;
+    clock += 60_000;
+    await provider.webhook!.sync(channels);
+    expect(subCalls()).toHaveLength(0);
+  });
+
+  it('does not re-subscribe while the stored subscription could not be deleted, and retries failed deletes', async () => {
+    kv.set('kick:subscriptions', { subs: { '100': { ids: { 'livestream.status.updated@1': 'old-s', 'livestream.metadata.updated@1': 'old-m' } } }, orphans: [] });
+    server.on('GET', SUBS, () =>
+      json({ data: [{ id: 'gone-streamer', broadcaster_user_id: 999, event: 'livestream.status.updated', version: 1, method: 'webhook' }] }),
+    );
+    server.on('DELETE', SUBS, () => new Response('bad request', { status: 400 }));
+    creatingPosts();
+    const provider = makeProvider({ env: webhookEnv });
+
+    await provider.webhook!.sync([channel('100', 'a')]);
+    expect(postedFor()).toEqual([]);
+    const stored = kv.get<{ subs: Record<string, { ids: Record<string, string> }>; orphans: string[] }>('kick:subscriptions');
+    expect(stored?.subs['100']?.ids).toEqual({ 'livestream.status.updated@1': 'old-s', 'livestream.metadata.updated@1': 'old-m' });
+    expect(stored?.orphans).toEqual(['gone-streamer']);
+
+    // Kick recovers and the listing no longer shows the orphan: it is still deleted.
+    server.calls.length = 0;
+    server.on('GET', SUBS, () => json({ data: [] }));
+    server.on('DELETE', SUBS, () => new Response(null, { status: 204 }));
+    await provider.webhook!.sync([channel('100', 'a')]);
+    expect(deletedIds()).toEqual(['old-s', 'old-m', 'gone-streamer']);
+    expect(postedFor()).toEqual([100]);
   });
 
   it('records per-event errors and never throws when Kick is unreachable', async () => {

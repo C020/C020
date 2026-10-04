@@ -20,7 +20,7 @@ export const AUDIT_LEVEL_LABELS: Record<AuditLevel, string> = {
   error: 'خطأ',
 };
 
-/** Groups audit actions ("live.start", "account.add", "discord.role.deleted"...) for icons and filters. */
+/** Groups audit actions ("live.start", "account.add", "role.add", "discord.role.deleted"...) for icons and filters. */
 export function auditCategory(action: string): AuditCategory {
   const prefix = action.split('.', 1)[0] ?? '';
   switch (prefix) {
@@ -34,6 +34,7 @@ export function auditCategory(action: string): AuditCategory {
       return 'streamer';
     case 'settings':
       return 'settings';
+    case 'role': // per-member grants/removals: role.add, role.remove
     case 'roles':
       return 'roles';
     case 'discord':

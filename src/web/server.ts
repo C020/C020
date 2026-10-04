@@ -93,7 +93,14 @@ export async function createWebServer(ctx: AppContext, options: WebServerOptions
     const dto = new DtoMapper(ctx, members, now);
     sse = new SseHub(ctx, dto, {
       heartbeatMs: options.sseHeartbeatMs,
-      isSessionValid: (sessionId) => ctx.repos.webSessions.get(sessionId) !== null,
+      // Same rules as a new request: the session must exist and not be expired, and its (periodically refreshed)
+      // guild permissions must still allow this guild. The bot's own guild membership is not re-checked here.
+      isSessionValid: async (sessionId, guildId) => {
+        const session = ctx.repos.webSessions.get(sessionId);
+        if (!session || Date.parse(session.expiresAt) <= now()) return false;
+        const fresh = await auth.ensureFreshGuilds(session);
+        return fresh !== null && auth.canAccessGuild(auth.authState(fresh), guildId);
+      },
     });
     const deps: ApiDeps = { ctx, auth, dto, members, sse, now };
 

@@ -99,6 +99,15 @@ const UPCOMING_SLOW_RECHECK_MS = 15 * MINUTE;
 const UPCOMING_UNSCHEDULED_RECHECK_MS = 5 * MINUTE;
 /** Scheduled streams that never started are dropped after this long. */
 const UPCOMING_DROP_AFTER_MS = 7 * DAY;
+/**
+ * A tracked stream is only treated as gone (deleted/private) after this many consecutive videos.list answers
+ * leave it out: a single answer can omit it (API inconsistency, a short private toggle).
+ */
+const CANDIDATE_MAX_MISSES = 2;
+/** A WebSub push about a tracked stream makes it due on every check for this long (the API lags behind pushes)... */
+const PUSH_RECHECK_WINDOW_MS = 3 * MINUTE;
+/** ...but not more often than this. */
+const PUSH_RECHECK_MIN_GAP_MS = 15 * SECOND;
 
 // Content
 /** Ids the API does not return yet are retried with backoff (2, 4, 8, 16, 32 min ≈ 1 h) before being dropped. */
@@ -791,6 +800,10 @@ interface Candidate {
   actualStartTime: string | null;
   addedAt: number;
   checkedAt: number;
+  /** Consecutive videos.list answers that left the stream out; reset by the next answer that has it. */
+  misses?: number;
+  /** Last WebSub push about this stream (it may have gone live or ended): re-checked regardless of its schedule. */
+  pushedAt?: number;
 }
 
 interface PendingVerification {
@@ -1422,13 +1435,26 @@ export class YouTubeProvider implements PlatformProvider {
     return true;
   }
 
+  /** WebSub push about a tracked upcoming/live stream: it may have gone live or ended, so re-check it now. */
+  private onPushedStream(channelId: string, videoId: string): boolean {
+    const candidate = this.store.peek(channelId)?.candidates.find((c) => c.id === videoId);
+    if (!candidate) return false;
+    candidate.pushedAt = this.now();
+    this.store.markDirty(channelId);
+    this.store.flush();
+    return true;
+  }
+
   private onPushedDeletion(channelId: string, videoId: string): void {
     const state = this.store.peek(channelId);
     if (!state) return;
     const before = state.pending.length + state.items.length;
     state.pending = state.pending.filter((p) => p.id !== videoId);
     state.items = state.items.filter((i) => i.id !== videoId);
-    if (state.pending.length + state.items.length !== before) {
+    const candidate = state.candidates.find((c) => c.id === videoId);
+    // A tombstone counts as one answer without the stream: the next check that misses it too drops it.
+    if (candidate) candidate.misses = Math.max(candidate.misses ?? 0, CANDIDATE_MAX_MISSES - 1);
+    if (candidate || state.pending.length + state.items.length !== before) {
       this.store.markDirty(channelId);
       this.store.flush();
     }
@@ -1503,6 +1529,9 @@ export class YouTubeProvider implements PlatformProvider {
     // Without a cached resource (e.g. after a restart) the candidate is treated as never checked.
     const since = this.videoCache.has(c.id) ? now - c.checkedAt : Number.POSITIVE_INFINITY;
     const pollInterval = LIVE_RECHECK_MS[level];
+    if (c.pushedAt !== undefined && now - c.pushedAt <= PUSH_RECHECK_WINDOW_MS && (c.checkedAt < c.pushedAt || since >= PUSH_RECHECK_MIN_GAP_MS)) {
+      return 'essential';
+    }
     if (c.status === 'live') return since >= pollInterval ? 'essential' : 'skip';
     const scheduled = timeOf(c.scheduledStartTime);
     if (!Number.isFinite(scheduled)) return since >= UPCOMING_UNSCHEDULED_RECHECK_MS ? 'background' : 'skip';
@@ -1535,10 +1564,20 @@ export class YouTubeProvider implements PlatformProvider {
     if (!video) {
       // Deleted, made private, or not visible yet (very fresh pushes).
       if (candidate) {
-        state.candidates = state.candidates.filter((c) => c.id !== id);
-        this.videoCache.delete(id);
-        if (candidate.status === 'live' && !candidate.premiere) this.recordEnded(state, id, now, true);
-        this.logger.info({ channelId: state.channelId, videoId: id }, 'Tracked YouTube stream disappeared (deleted or private)');
+        const misses = (candidate.misses ?? 0) + 1;
+        if (misses < CANDIDATE_MAX_MISSES) {
+          // One answer without it proves nothing: keep the last known state until the next check confirms it.
+          candidate.misses = misses;
+          candidate.checkedAt = now;
+          this.logger.info({ channelId: state.channelId, videoId: id, misses }, 'Tracked YouTube stream missing from the API answer; re-checking');
+        } else {
+          state.candidates = state.candidates.filter((c) => c.id !== id);
+          this.videoCache.delete(id);
+          // Forgotten, so RSS/UU/WebSub can queue it again if it comes back (e.g. it was private for a while).
+          state.seen = state.seen.filter((s) => s !== id);
+          if (candidate.status === 'live' && !candidate.premiere) this.recordEnded(state, id, now, true);
+          this.logger.info({ channelId: state.channelId, videoId: id }, 'Tracked YouTube stream disappeared (deleted or private)');
+        }
       }
       if (pending) {
         pending.attempts++;
@@ -1550,6 +1589,8 @@ export class YouTubeProvider implements PlatformProvider {
 
     this.cacheVideo(video, now);
     state.pending = state.pending.filter((p) => p.id !== id);
+    // Visible again after it was given up as deleted/private: that verdict (no VOD) no longer holds.
+    if (state.ended.some((e) => e.id === id && e.vanished)) state.ended = state.ended.filter((e) => e.id !== id);
     const cls = classifyVideo(video);
     const removeCandidate = () => {
       state.candidates = state.candidates.filter((c) => c.id !== id);
@@ -1572,6 +1613,8 @@ export class YouTubeProvider implements PlatformProvider {
           actualStartTime: cls.type === 'live' ? normalizeTimestamp(cls.actualStartTime) : null,
           addedAt: candidate?.addedAt ?? now,
           checkedAt: now,
+          // Keep following up on a recent push (the answer can predate the change the push announced).
+          ...(candidate?.pushedAt !== undefined && now - candidate.pushedAt <= PUSH_RECHECK_WINDOW_MS ? { pushedAt: candidate.pushedAt } : {}),
         };
         if (cls.type === 'live' && candidate?.status !== 'live') this.logger.info({ channelId: state.channelId, videoId: id }, 'YouTube stream is live');
         state.candidates = [...state.candidates.filter((c) => c.id !== id), next];
@@ -1770,7 +1813,7 @@ export class YouTubeProvider implements PlatformProvider {
       hubUrl,
       callbacks: {
         onNewVideo: (entry) => this.enqueuePushed(entry),
-        isTrackedStream: (channelId, videoId) => !!this.store.peek(channelId)?.candidates.some((c) => c.id === videoId),
+        isTrackedStream: (channelId, videoId) => this.onPushedStream(channelId, videoId),
         onDeleted: (channelId, videoId) => this.onPushedDeletion(channelId, videoId),
       },
     });

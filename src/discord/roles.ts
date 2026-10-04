@@ -14,7 +14,7 @@ import type { Repositories } from '../db/repositories.js';
 import type { AuditService } from '../services/audit.js';
 import type { RoleChangeOutcome, RoleManager } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
-import { decideRoleAssignability, type RoleAssignDecision } from './permissions.js';
+import { decideRoleAssignability, isElevatedPermissions, type RoleAssignDecision } from './permissions.js';
 import { isSnowflake, KeyedQueue, WarnThrottle } from './util.js';
 
 const log = childLogger('discord.roles');
@@ -167,7 +167,8 @@ export class DiscordRoles implements RoleManager {
           members: new Set(members.byId.keys()),
           removable: target.removable,
         });
-        for (const userId of plan.add) {
+        const adds = plan.add.length > 0 && this.refusesToGrant(guild, role, target.kind) ? [] : plan.add;
+        for (const userId of adds) {
           const member = members.byId.get(userId);
           if (member && (await this.change(guild, role, member, true, 'مزامنة الرتب', target.kind)) === 'applied') added++;
         }
@@ -210,6 +211,7 @@ export class DiscordRoles implements RoleManager {
         }
         const role = await this.resolveTarget(guild, roleId, kind);
         if (typeof role === 'string') return role;
+        if (want && this.refusesToGrant(guild, role, kind)) return 'config';
         const member = await this.fetchMember(guild, userId);
         if (member === 'transient') return 'transient';
         if (member === 'missing') {
@@ -248,6 +250,20 @@ export class DiscordRoles implements RoleManager {
       return 'config';
     }
     return role;
+  }
+
+  /**
+   * Never hands out a role with moderation/admin power (settings reject picking one, but a role chosen before that
+   * check, picked while Discord was offline, or edited afterwards may still carry it). Taking it away stays allowed.
+   */
+  private refusesToGrant(guild: Guild, role: Role, kind: RoleKind): boolean {
+    if (!isElevatedPermissions(role.permissions?.bitfield ?? 0n)) return false;
+    this.warn(
+      guild.id,
+      `role_elevated:${role.id}`,
+      `رتبة ${role.name} فيها صلاحيات إدارية (مثل Administrator أو Manage Roles أو Ban Members)، فالبوت ما راح يعطيها لأحد تلقائياً — اختر رتبة ${ROLE_LABELS[kind]} بدون صلاحيات إدارية من الإعدادات`,
+    );
+    return true;
   }
 
   /** Can the bot add/remove this role? 'transient' when the bot's own member could not be resolved. */

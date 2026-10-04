@@ -54,6 +54,16 @@ describe('format helpers', () => {
     expect(cleanText(null)).toBe('');
   });
 
+  it('keeps zero-width joiners inside composite emojis and words, dropping only stray ones', () => {
+    const title = '\u{1F468}\u200D\u{1F4BB} كودنق مع الشباب \u{1F3F3}\uFE0F\u200D\u{1F308} \u2764\uFE0F\u200D\u{1F525}';
+    expect(cleanText(title)).toBe(title);
+    // Persian uses the zero-width non-joiner inside words.
+    expect(cleanText('می\u200Cخواهم')).toBe('می\u200Cخواهم');
+    // Joiners that join nothing (word edges) are still removed, like other invisible characters.
+    expect(cleanText('\u200Dabc\u200D \u200C\u200Cdef\u200C')).toBe('abc def');
+    expect(cleanText('a\u200Bb\u2066c\uFEFF')).toBe('abc');
+  });
+
   it('truncates without breaking surrogate pairs or leaving a dangling escape', () => {
     expect(truncate('abcdef', 4)).toBe('abc…');
     expect(truncate('abc', 3)).toBe('abc');

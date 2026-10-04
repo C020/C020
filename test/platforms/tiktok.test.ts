@@ -490,23 +490,63 @@ describe('checkLive', () => {
     expect(server.calls).toHaveLength(1);
   });
 
-  it('treats user_not_found as offline, cross-checking the live page every 15 minutes', async () => {
+  it('treats user_not_found as offline, cross-checking the live page right away and then every 15 minutes', async () => {
+    let livePage = () => html(sigiHtml({ user: liveUser({ roomId: '' }), liveRoom: liveRoom(4) }));
     server
       .on(API_LIVE, () => json(USER_NOT_FOUND))
-      .on(LIVE_PAGE, () => html(sigiHtml({ user: liveUser(), liveRoom: liveRoom(2) })))
+      .on(LIVE_PAGE, () => livePage())
       .on(ROOM_INFO, () => json(roomInfoBody(2)));
     const provider = setup();
 
     expect((await provider.checkLive([channel]))[0]?.isLive).toBe(false);
+    expect(server.callsTo(LIVE_PAGE)).toHaveLength(1);
+    livePage = () => html(sigiHtml({ user: liveUser(), liveRoom: liveRoom(2) }));
     clock += 5 * MINUTE;
     expect((await provider.checkLive([channel]))[0]?.isLive).toBe(false);
-    expect(server.callsTo(LIVE_PAGE)).toHaveLength(0);
+    expect(server.callsTo(LIVE_PAGE)).toHaveLength(1);
 
     // api-live sometimes says user_not_found for creators who are live; the periodic cross-check catches it.
     clock += 11 * MINUTE;
     const [snapshot] = await provider.checkLive([channel]);
     expect(snapshot).toMatchObject({ isLive: true, streamId: ROOM_ID, viewers: 1543 });
+    expect(server.callsTo(LIVE_PAGE)).toHaveLength(2);
+  });
+
+  it('cross-checks the first user_not_found of a fresh process instead of reporting a live creator offline', async () => {
+    server
+      .on(API_LIVE, () => json(USER_NOT_FOUND))
+      .on(LIVE_PAGE, () => html(sigiHtml({ user: liveUser(), liveRoom: liveRoom(2) })))
+      .on(ROOM_INFO, () => json(roomInfoBody(2)));
+
+    const [snapshot] = await setup().checkLive([channel]);
+
+    expect(snapshot).toMatchObject({ isLive: true, streamId: ROOM_ID });
     expect(server.callsTo(LIVE_PAGE)).toHaveLength(1);
+  });
+
+  it('remembers a recent live observation across restarts, so user_not_found stays unknown', async () => {
+    let apiLive: unknown = apiLiveBody(2);
+    server
+      .on(API_LIVE, () => json(apiLive))
+      .on(ROOM_INFO, () => json(roomInfoBody(2)))
+      .on(LIVE_PAGE, forbidden);
+    expect((await setup().checkLive([channel]))[0]?.isLive).toBe(true);
+    expect(kv.get<Record<string, number>>('tiktok:lastLive')).toEqual({ [HANDLE]: T0 });
+
+    // Restart mid-stream: api-live now says user_not_found and the live page is blocked.
+    apiLive = USER_NOT_FOUND;
+    clock += 3 * MINUTE;
+    const error = await setup().checkLive([channel]).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).retryable).toBe(true);
+
+    // Outside the contradiction window the persisted observation no longer counts (and is pruned).
+    clock = T0 + 21 * MINUTE;
+    const restarted = setup();
+    expect((await restarted.checkLive([channel]))[0]?.isLive).toBe(false);
+    server.on(API_LIVE, () => json(apiLiveBody(2)));
+    await restarted.checkLive([channel]);
+    expect(kv.get<Record<string, number>>('tiktok:lastLive')).toEqual({ [HANDLE]: T0 + 21 * MINUTE });
   });
 
   it('never reports offline when user_not_found contradicts a recent live observation', async () => {
@@ -567,6 +607,48 @@ describe('checkLive', () => {
 
     expect(snapshot).toMatchObject({ isLive: true, streamId: ROOM_ID, viewers: 1543, title: 'Ranked grind with viewers' });
     expect(server.callsTo(EULER_ROOM_ID)[0]?.headers['x-api-key']).toBe('euler-key');
+  });
+
+  it('does not report a guest appearance from Euler as the account going live', async () => {
+    const hosted = roomInfoBody(2);
+    hosted.data.owner = { display_id: 'big.host', nickname: 'Host' };
+    server
+      .on(API_LIVE, forbidden)
+      .on(LIVE_PAGE, forbidden)
+      .on(EULER_ROOM_ID, () => json({ code: 200, ok: true, routes_attempted: ['tiktok'], is_live: true, room_id: ROOM_ID, room_status: 2 }))
+      .on(ROOM_INFO, () => json(hosted));
+
+    const [snapshot] = await setup({ TIKTOK_SIGN_API_KEY: 'euler-key' }).checkLive([channel]);
+
+    expect(snapshot?.isLive).toBe(false);
+  });
+
+  it('never starts a stream from Euler on a transitional room status', async () => {
+    server
+      .on(API_LIVE, forbidden)
+      .on(LIVE_PAGE, forbidden)
+      .on(EULER_ROOM_ID, () => json({ code: 200, ok: true, routes_attempted: ['tiktok'], is_live: true, room_id: ROOM_ID, room_status: 1 }))
+      .on(ROOM_INFO, () => json(roomInfoBody(1)));
+
+    const error = await setup({ TIKTOK_SIGN_API_KEY: 'euler-key' }).checkLive([channel]).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).message).toContain('euler: ambiguous room status 1');
+  });
+
+  it('applies Euler room_status even when room/info is unavailable', async () => {
+    kv.set('tiktok:breaker', { consecutiveBlocks: 0, trips: 1, openUntil: T0 + 5 * MINUTE, lastReason: 'HTTP 403', lastBlockAt: T0 });
+    let euler: Record<string, unknown> = { is_live: true, room_id: ROOM_ID, room_status: 3 };
+    server.on(EULER_ROOM_ID, () => json({ code: 200, ok: true, routes_attempted: ['tiktok'], ...euler }));
+    const provider = setup({ TIKTOK_SIGN_API_KEY: 'euler-key' });
+
+    await expect(provider.checkLive([channel])).rejects.toBeInstanceOf(ProviderError);
+    euler = { is_live: true, room_id: ROOM_ID };
+    expect((await provider.checkLive([channel]))[0]).toMatchObject({ isLive: true, streamId: ROOM_ID });
+    // Status 3 keeps a stream the bot already saw live alive.
+    euler = { is_live: true, room_id: ROOM_ID, room_status: 3 };
+    expect((await provider.checkLive([channel]))[0]?.isLive).toBe(true);
+    expect(server.calls.every((c) => c.url.host === 'api.eulerstream.com')).toBe(true);
   });
 
   it('pauses Euler after the key is rejected', async () => {

@@ -48,6 +48,8 @@ function env(): { env: TestEnv; removeRoleFrom: ReturnType<typeof vi.fn> } {
 }
 
 const perms = (bits: bigint) => String(bits);
+/** Passes the dashboard's Manage Server gate, but has no Manage Roles. */
+const manageServerOnly = (e: TestEnv) => login(e, undefined, [manageable(GUILD, { owner: false, permissions: perms(MANAGE_GUILD) })]);
 
 async function put(e: TestEnv, headers: Record<string, string>, payload: object) {
   server ??= await startServer(e);
@@ -68,7 +70,7 @@ describe('permissions helpers', () => {
 describe('PUT /settings role fields need Manage Roles', () => {
   it('rejects a Manage Server-only user changing the live or streamer role (403, Arabic, nothing saved or synced)', async () => {
     const { env: e, removeRoleFrom } = env();
-    const auth = login(e); // manageable(GUILD): Manage Server only
+    const auth = manageServerOnly(e);
     for (const [field, value] of [
       ['liveRoleId', ROLE_B],
       ['streamerRoleId', ROLE_A],
@@ -92,7 +94,7 @@ describe('PUT /settings role fields need Manage Roles', () => {
   it('still lets a Manage Server-only user change everything else (and resend the same role ids)', async () => {
     const { env: e } = env();
     e.repos.settings.update(GUILD, { liveRoleId: ROLE_B });
-    const auth = login(e);
+    const auth = manageServerOnly(e);
     const res = await put(e, auth.headers, { liveRoleId: ROLE_B, pingMode: 'everyone', options: { summaryEnabled: false } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ liveRoleId: ROLE_B, pingMode: 'everyone' });

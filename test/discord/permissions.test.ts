@@ -4,6 +4,7 @@ import {
   buildInviteUrl,
   compareRolePositions,
   decideRoleAssignability,
+  isElevatedPermissions,
   missingPostingPermissions,
   REQUIRED_PERMISSIONS,
 } from '../../src/discord/permissions.js';
@@ -86,6 +87,8 @@ describe('invite URL', () => {
       PermissionFlagsBits.ViewChannel |
       PermissionFlagsBits.SendMessages |
       PermissionFlagsBits.EmbedLinks |
+      // Expiring TikTok images are uploaded as attachments.
+      PermissionFlagsBits.AttachFiles |
       PermissionFlagsBits.ReadMessageHistory;
     expect(REQUIRED_PERMISSIONS).toBe(expected);
     expect(url).toBe(`https://discord.com/oauth2/authorize?client_id=123456789012345678&scope=bot%20applications.commands&permissions=${expected}`);
@@ -106,5 +109,26 @@ describe('planRoleReconcile', () => {
 
   it('is a no-op when everything already matches', () => {
     expect(planRoleReconcile({ holders: ['a'], desired: ['a'], members: null })).toEqual({ add: [], remove: [] });
+  });
+});
+
+describe('isElevatedPermissions', () => {
+  it('flags moderation/admin power and ignores ordinary member permissions', () => {
+    expect(isElevatedPermissions(0n)).toBe(false);
+    expect(isElevatedPermissions(PermissionFlagsBits.SendMessages | PermissionFlagsBits.AttachFiles | PermissionFlagsBits.EmbedLinks)).toBe(false);
+    for (const flag of [
+      PermissionFlagsBits.Administrator,
+      PermissionFlagsBits.ManageGuild,
+      PermissionFlagsBits.ManageRoles,
+      PermissionFlagsBits.ManageChannels,
+      PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.ManageWebhooks,
+      PermissionFlagsBits.BanMembers,
+      PermissionFlagsBits.KickMembers,
+      PermissionFlagsBits.ModerateMembers,
+      PermissionFlagsBits.MentionEveryone,
+    ]) {
+      expect(isElevatedPermissions(flag | PermissionFlagsBits.SendMessages)).toBe(true);
+    }
   });
 });

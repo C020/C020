@@ -364,3 +364,50 @@ describe('DiscordRoles.removeRoleFrom (settings changed back)', () => {
     expect(a.roleCalls).toHaveLength(0);
   });
 });
+
+describe('DiscordRoles never hands out a role with moderation/admin power', () => {
+  // Own property in the discord.js shape the guard reads (shadows whatever the fake role provides).
+  const elevate = (role: object, bits: bigint) => Object.defineProperty(role, 'permissions', { value: { bitfield: bits }, configurable: true });
+
+  it('setStreamer / setLive refuse to add an elevated role (config, warned once) but still take it away', async () => {
+    const { roles, guild, streamerRole, liveRole, warnings } = setup();
+    elevate(streamerRole, PermissionFlagsBits.BanMembers);
+    elevate(liveRole, PermissionFlagsBits.Administrator);
+    const a = guild.addMember(A, 'a');
+    const b = guild.addMember(B, 'b', { roles: [streamerRole, liveRole] });
+
+    await expect(roles.setStreamer(GUILD, A, true, 'تسجيل')).resolves.toBe('config');
+    await expect(roles.setStreamer(GUILD, A, true, 'تسجيل')).resolves.toBe('config');
+    await expect(roles.setLive(GUILD, A, true, 'بدأ البث')).resolves.toBe('config');
+    expect(a.roleCalls).toHaveLength(0);
+    expect(warnings().map((w) => w.details?.key).sort()).toEqual([`role_elevated:${STREAMER_ROLE}`, `role_elevated:${LIVE_ROLE}`].sort());
+    expect(warnings()[0]!.message).toContain('صلاحيات إدارية');
+
+    await expect(roles.setLive(GUILD, B, false, 'انتهى البث')).resolves.toBe('applied');
+    await expect(roles.setStreamer(GUILD, B, false, 'حذف')).resolves.toBe('applied');
+    expect(b.roles.cache.size).toBe(0);
+  });
+
+  it('reconcile skips additions of an elevated role but still removes it from streamers who are not live', async () => {
+    const { roles, guild, repos, streamerRole, liveRole } = setup();
+    elevate(streamerRole, PermissionFlagsBits.ManageRoles);
+    elevate(liveRole, PermissionFlagsBits.KickMembers);
+    repos.streamers.create({ guildId: GUILD, discordUserId: A, displayName: 'a' });
+    repos.streamers.create({ guildId: GUILD, discordUserId: B, displayName: 'b' });
+    const a = guild.addMember(A, 'a');
+    const b = guild.addMember(B, 'b', { roles: [liveRole] });
+
+    const result = await roles.reconcile(GUILD, new Set([A]), new Set([A, B]));
+    expect(a.roleCalls).toHaveLength(0);
+    expect(b.roleCalls).toEqual([{ op: 'remove', roleId: LIVE_ROLE, reason: 'مزامنة الرتب' }]);
+    expect(result).toEqual({ added: 0, removed: 1 });
+  });
+
+  it('keeps granting ordinary roles (permissions without moderation power)', async () => {
+    const { roles, guild, streamerRole } = setup();
+    elevate(streamerRole, PermissionFlagsBits.SendMessages | PermissionFlagsBits.Stream);
+    const a = guild.addMember(A, 'a');
+    await expect(roles.setStreamer(GUILD, A, true, 'تسجيل')).resolves.toBe('applied');
+    expect(a.roles.cache.has(STREAMER_ROLE)).toBe(true);
+  });
+});

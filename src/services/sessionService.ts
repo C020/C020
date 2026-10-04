@@ -18,8 +18,9 @@
  * - Every handler is failure-isolated per subscriber and never throws to the monitor.
  * - Discord failures heal: a summary that could not be published stays `summaryPending` in the DB and is
  *   retried with backoff (and after a restart); a live edit that failed transiently or lost access is retried
- *   without reposting; a live-role change that failed transiently schedules a role reconcile for the guild, and
- *   guilds with active or recently ended sessions are reconciled periodically and after gateway reconnects.
+ *   without reposting (only a message that is really gone is reposted); a live-role change that failed
+ *   transiently is retried with backoff, and guilds with active or recently ended sessions get a periodic role
+ *   reconcile (also right after the Discord gateway reconnects).
  */
 import type { ProviderRegistryApi, SessionServiceApi } from '../app/context.js';
 import { errorMessage } from '../core/errors.js';
@@ -116,6 +117,13 @@ const RECENT_ROLE_GUILD_MS = 30 * 60_000;
 /** A guild whose role reconcile keeps failing (bot offline / not in the guild) is given up after this long. */
 const ROLE_REPAIR_MAX_AGE_MS = 24 * 3_600_000;
 
+interface RetryState {
+  dueAt: number;
+  attempt: number;
+  /** First failure (ms): retries stop after ROLE_REPAIR_MAX_AGE_MS. */
+  since: number;
+}
+
 /** Serializes async work per key (FIFO). Different keys run concurrently. */
 export class KeyedMutex<K> {
   private readonly tails = new Map<K, Promise<void>>();
@@ -192,8 +200,10 @@ export class SessionService implements SessionServiceApi {
   private readonly summaryRetryAt = new Map<number, number>();
   /** Last live thumbnail of ended sessions whose summary is still pending (their runtime is gone). */
   private readonly summaryThumbnails = new Map<number, string | null>();
-  /** Guilds whose roles must be reconciled after a failure, with backoff state. */
-  private readonly roleRepairs = new Map<string, { dueAt: number; attempt: number; since: number }>();
+  /** Live-role changes that failed transiently, by `guildId:userId`; retried with backoff (desired state re-read from the DB). */
+  private readonly liveRoleRetries = new Map<string, RetryState & { guildId: string; userId: string; streamerId: number }>();
+  /** Guilds whose role reconcile failed (Discord not ready, bot not in the guild), with backoff state. */
+  private readonly roleRepairs = new Map<string, RetryState>();
   /** Guilds where a session ended recently (ms): part of the periodic role reconcile. */
   private readonly recentRoleGuilds = new Map<string, number>();
   private lastRoleSweepAt: number;
@@ -263,13 +273,16 @@ export class SessionService implements SessionServiceApi {
   }
 
   /**
-   * Reconciles live roles where they may be wrong: guilds with active or recently ended sessions and guilds
-   * with a failed role change. Called after the Discord gateway reconnects (role changes may have failed meanwhile).
+   * Repairs live roles now: retries pending live-role changes and reconciles guilds with active or recently
+   * ended sessions or a failed reconcile. Called after the Discord gateway reconnects (role changes may have
+   * failed meanwhile).
    */
   async reconcileLiveRoles(): Promise<void> {
-    const now = this.clock();
-    const guilds = new Set([...this.sweepGuilds(now), ...this.roleRepairs.keys()]);
-    for (const guildId of guilds) await this.reconcileRolesOf(guildId, now);
+    // Everything becomes due now; if a role pass is already running, the next tick picks it up.
+    for (const entry of this.liveRoleRetries.values()) entry.dueAt = 0;
+    for (const repair of this.roleRepairs.values()) repair.dueAt = 0;
+    this.lastRoleSweepAt = Number.NEGATIVE_INFINITY;
+    await this.exclusive('roles', () => this.maintainRoles());
   }
 
   // ───────────────────────────── monitor events ─────────────────────────────
@@ -1160,18 +1173,66 @@ export class SessionService implements SessionServiceApi {
   }
 
   private async setLiveRole(scope: Scope, live: boolean, reason: string): Promise<void> {
+    const { guildId, streamer } = scope;
+    const key = `${guildId}:${streamer.discordUserId}`;
     let outcome: RoleChangeOutcome;
     try {
-      outcome = await this.roles.setLive(scope.guildId, scope.streamer.discordUserId, live, reason);
+      outcome = await this.roles.setLive(guildId, streamer.discordUserId, live, reason);
     } catch (err) {
-      log.warn({ err, guildId: scope.guildId, streamerId: scope.streamer.id, live }, 'Updating live role failed');
+      log.warn({ err, guildId, streamerId: streamer.id, live }, 'Updating live role failed');
       outcome = 'transient';
     }
-    // The reconcile computes the desired state from the DB when it runs, so it can never undo a newer change.
-    if (outcome === 'transient') this.scheduleRoleRepair(scope.guildId);
+    if (outcome !== 'transient') {
+      // A newer change went through (or needs an admin fix): an older pending retry is obsolete.
+      this.liveRoleRetries.delete(key);
+      return;
+    }
+    if (this.liveRoleRetries.has(key)) return;
+    const now = this.clock();
+    log.warn({ guildId, streamerId: streamer.id, live }, 'Live role change failed transiently; will retry');
+    this.liveRoleRetries.set(key, { guildId, userId: streamer.discordUserId, streamerId: streamer.id, dueAt: now + this.roleRetryDelay(0), attempt: 0, since: now });
   }
 
   // ───────────────────────────── role maintenance ─────────────────────────────
+
+  /** Whether the member should hold the live role right now (same rule as the guild reconcile). */
+  private wantsLiveRole(guildId: string, userId: string): boolean {
+    return this.repos.streamers.list(guildId).some((s) => s.enabled && s.discordUserId === userId && this.repos.sessions.getActive(s.id) !== null);
+  }
+
+  /**
+   * Retries a live-role change that failed transiently. The desired state is read from the DB under the
+   * streamer's lock, so a retry can never undo a newer go-live or end.
+   */
+  private async retryLiveRole(key: string, entry: RetryState & { guildId: string; userId: string; streamerId: number }): Promise<void> {
+    await this.lock
+      .run(entry.streamerId, async () => {
+        if (this.liveRoleRetries.get(key) !== entry) return; // superseded meanwhile
+        const live = this.wantsLiveRole(entry.guildId, entry.userId);
+        let outcome: RoleChangeOutcome;
+        try {
+          outcome = await this.roles.setLive(entry.guildId, entry.userId, live, live ? 'بدأ البث' : 'انتهى البث');
+        } catch (err) {
+          log.debug({ err, guildId: entry.guildId }, 'Live role retry threw');
+          outcome = 'transient';
+        }
+        if (this.liveRoleRetries.get(key) !== entry) return;
+        const now = this.clock();
+        if (outcome !== 'transient') {
+          this.liveRoleRetries.delete(key);
+          log.info({ guildId: entry.guildId, streamerId: entry.streamerId, live, outcome }, 'Live role change retried');
+          return;
+        }
+        if (now - entry.since >= ROLE_REPAIR_MAX_AGE_MS) {
+          this.liveRoleRetries.delete(key);
+          log.warn({ guildId: entry.guildId, streamerId: entry.streamerId, live }, 'Giving up retrying the live role change');
+          return;
+        }
+        const attempt = entry.attempt + 1;
+        this.liveRoleRetries.set(key, { ...entry, attempt, dueAt: now + this.roleRetryDelay(attempt) });
+      })
+      .catch((err) => log.warn({ err, guildId: entry.guildId }, 'Live role retry failed'));
+  }
 
   private scheduleRoleRepair(guildId: string): void {
     if (this.roleRepairs.has(guildId)) return;
@@ -1194,9 +1255,10 @@ export class SessionService implements SessionServiceApi {
     return guilds;
   }
 
-  /** Due role repairs, plus the periodic reconcile of guilds with active or recently ended sessions. */
+  /** Due live-role retries and guild repairs, plus the periodic reconcile of guilds with active or recently ended sessions. */
   private async maintainRoles(): Promise<void> {
     const now = this.clock();
+    for (const [key, entry] of [...this.liveRoleRetries]) if (entry.dueAt <= now) await this.retryLiveRole(key, entry);
     const guilds = new Set<string>();
     for (const [guildId, repair] of this.roleRepairs) if (repair.dueAt <= now) guilds.add(guildId);
     if (now - this.lastRoleSweepAt >= this.timing.roleReconcileMs) {

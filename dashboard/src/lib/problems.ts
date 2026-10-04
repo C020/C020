@@ -26,6 +26,6 @@ export function problemFix(code: string): ProblemFix | null {
 export function problemHint(code: string): string | null {
   if (code.endsWith('role_above_bot')) return 'من إعدادات السيرفر ← الرتب: اسحب رتبة البوت فوق رتبة الستريمر ورتبة البث.';
   if (code === 'missing_manage_roles') return 'أو من إعدادات السيرفر ← الرتب ← رتبة البوت: فعّل صلاحية Manage Roles.';
-  if (code.endsWith('channel_no_permission')) return 'من إعدادات الروم ← الصلاحيات: اسمح للبوت بـ View Channel و Send Messages و Embed Links.';
+  if (code.endsWith('channel_no_permission')) return 'من إعدادات الروم ← الصلاحيات: اسمح للبوت بـ View Channel و Send Messages و Embed Links و Attach Files.';
   return null;
 }

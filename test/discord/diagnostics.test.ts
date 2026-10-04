@@ -52,6 +52,19 @@ describe('diagnoseGuild', () => {
     expect(result).toEqual({ guildId: GUILD, botInGuild: true, botHasManageRoles: true, problems: [] });
   });
 
+  it('warns (without failing the channel) when the bot cannot upload expiring TikTok images', () => {
+    const noUploads = (id: string) => [id, channelFact(id, { canAttachFiles: false })] as const;
+    const channels = new Map([noUploads(LIVE_CHANNEL), noUploads(CONTENT_CHANNEL), noUploads(LOG_CHANNEL)]);
+    const result = diagnoseGuild(facts({ channels }), configured);
+    expect(result.problems.map((p) => [p.code, p.level])).toEqual([
+      ['live_channel_no_attach_files', 'warn'],
+      ['content_channel_no_attach_files', 'warn'],
+    ]);
+    expect(result.problems[0]!.message).toContain('إرفاق الملفات (Attach Files)');
+    // Only TikTok images are uploaded.
+    expect(codes(diagnoseGuild(facts({ channels }), { ...configured, platformsEnabled: ['twitch', 'kick'] }))).toEqual([]);
+  });
+
   it('stops early when Discord is not ready or the bot is not in the guild', () => {
     expect(codes(diagnoseGuild(facts({ ready: false }), configured))).toEqual(['discord_not_ready']);
     const notInGuild = diagnoseGuild(facts({ inGuild: false }), configured);

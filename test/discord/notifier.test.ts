@@ -91,48 +91,65 @@ describe('postLive', () => {
     expect(deliveryWarnings()).toHaveLength(2);
   });
 
-  it('treats a thrown transport error as a failed post', async () => {
+  it('treats a thrown transport error as a failed (transient) post', async () => {
     const { notifier, transport, deliveryWarnings } = setup();
     transport.throwNext = true;
     expect(await notifier.postLive(live())).toBeNull();
-    expect(deliveryWarnings()).toHaveLength(0);
+    expect(deliveryWarnings().map((w) => w.details.reason)).toEqual(['error']);
   });
 });
 
 describe('updateLive', () => {
   it('edits with the same ping and allowedMentions as the original post', async () => {
     const { notifier, transport } = setup();
-    expect(await notifier.updateLive(REF, live({ pingMode: 'everyone' }))).toBe(true);
+    expect(await notifier.updateLive(REF, live({ pingMode: 'everyone' }))).toBe('ok');
     expect(transport.calls[0]).toMatchObject({ op: 'edit', channelId: LIVE_CHANNEL, messageId: REF.messageId });
     expect(transport.calls[0]!.message.content).toBe('@everyone');
     expect(transport.calls[0]!.message.allowedMentions.parse).toEqual(['everyone']);
   });
 
-  it.each(['gone', 'channel_missing', 'wrong_guild', 'not_text', 'forbidden'] as const)('returns false when the message cannot be edited (%s)', async (reason) => {
+  it.each(['gone', 'channel_missing', 'wrong_guild', 'not_text'] as const)("reports 'gone' when the message no longer exists (%s)", async (reason) => {
     const { notifier, transport } = setup();
     transport.push({ ok: false, reason, detail: reason });
-    expect(await notifier.updateLive(REF, live())).toBe(false);
+    expect(await notifier.updateLive(REF, live())).toBe('gone');
   });
 
-  it.each(['error', 'not_ready', 'invalid'] as const)('keeps the message on transient failures (%s)', async (reason) => {
+  it("reports 'forbidden' (not 'gone') when access to the channel is lost, and warns the admins", async () => {
+    const { notifier, transport, deliveryWarnings } = setup();
+    transport.push({ ok: false, reason: 'forbidden', detail: 'Missing Access' });
+    expect(await notifier.updateLive(REF, live())).toBe('forbidden');
+    expect(deliveryWarnings().map((w) => w.details.reason)).toEqual(['forbidden']);
+  });
+
+  it.each(['error', 'not_ready'] as const)("reports 'transient' and keeps the message on transient failures (%s)", async (reason) => {
     const { notifier, transport } = setup();
     transport.push({ ok: false, reason, detail: reason });
-    expect(await notifier.updateLive(REF, live())).toBe(true);
+    expect(await notifier.updateLive(REF, live())).toBe('transient');
+    expect(transport.calls.map((c) => c.op)).toEqual(['edit']);
   });
 
-  it('keeps the message when the transport throws', async () => {
+  it('treats a refused payload as rendered (resending it cannot succeed) and reports it', async () => {
+    const { notifier, transport, deliveryWarnings } = setup();
+    transport.push({ ok: false, reason: 'invalid', detail: '50035' });
+    expect(await notifier.updateLive(REF, live())).toBe('ok');
+    expect(deliveryWarnings().map((w) => w.details.reason)).toEqual(['invalid']);
+  });
+
+  it("reports 'transient' when the transport throws", async () => {
     const { notifier, transport } = setup();
     transport.throwNext = true;
-    expect(await notifier.updateLive(REF, live())).toBe(true);
+    expect(await notifier.updateLive(REF, live())).toBe('transient');
   });
 });
 
 describe('postSummary', () => {
-  const summary = (patch: Parameters<typeof settings>[0] = {}) => summaryView({ settings: settings({ liveChannelId: LIVE_CHANNEL, pingMode: 'everyone', ...patch }) });
+  const summary = (patch: Parameters<typeof settings>[0] = {}, view: Partial<Parameters<typeof summaryView>[0]> = {}) =>
+    summaryView({ settings: settings({ liveChannelId: LIVE_CHANNEL, pingMode: 'everyone', ...patch }), ...view });
+  const disabled = { options: { ...settings().options, summaryEnabled: false } };
 
   it('edits the live message into the summary, without the ping', async () => {
     const { notifier, transport } = setup();
-    expect(await notifier.postSummary(REF, summary())).toEqual(REF);
+    expect(await notifier.postSummary(REF, summary())).toEqual({ status: 'done', ref: REF });
     expect(transport.calls).toHaveLength(1);
     const { message } = transport.calls[0]!;
     expect(message.content).toBe('');
@@ -143,37 +160,116 @@ describe('postSummary', () => {
   it('posts a new summary when the live message is gone', async () => {
     const { notifier, transport } = setup();
     transport.push({ ok: false, reason: 'gone', detail: 'Unknown Message' });
-    expect(await notifier.postSummary(REF, summary())).toEqual({ channelId: LIVE_CHANNEL, messageId: 'm1' });
+    expect(await notifier.postSummary(REF, summary())).toEqual({ status: 'done', ref: { channelId: LIVE_CHANNEL, messageId: 'm1' } });
     expect(transport.calls.map((c) => c.op)).toEqual(['edit', 'send']);
   });
 
-  it('never posts a duplicate on a transient failure', async () => {
+  it.each(['error', 'not_ready'] as const)("never posts a duplicate on a transient failure and reports 'transient' (%s)", async (reason) => {
     const { notifier, transport } = setup();
-    transport.push({ ok: false, reason: 'error', detail: '500' });
-    expect(await notifier.postSummary(REF, summary())).toBeNull();
+    transport.push({ ok: false, reason, detail: '503' });
+    expect(await notifier.postSummary(REF, summary())).toEqual({ status: 'transient', reason });
     expect(transport.calls.map((c) => c.op)).toEqual(['edit']);
+  });
+
+  it('warns the admins (in Arabic, once per hour) when a summary cannot be delivered because of a Discord error', async () => {
+    const { notifier, transport, deliveryWarnings } = setup();
+    transport.push({ ok: false, reason: 'error', detail: '503' }, { ok: false, reason: 'error', detail: '503' });
+    await notifier.postSummary(REF, summary());
+    await notifier.postSummary(REF, summary());
+    expect(deliveryWarnings()).toHaveLength(1);
+    expect(deliveryWarnings()[0]!.message).toContain('تعذّر إيصال رسالة إشعارات البث');
+  });
+
+  it("keeps the old message when access was lost ('transient', no duplicate in the same channel)", async () => {
+    const { notifier, transport, deliveryWarnings } = setup();
+    transport.push({ ok: false, reason: 'forbidden', detail: 'Missing Access' });
+    expect(await notifier.postSummary(REF, summary())).toEqual({ status: 'transient', reason: 'forbidden' });
+    expect(transport.calls.map((c) => c.op)).toEqual(['edit']);
+    expect(deliveryWarnings().map((w) => w.details.reason)).toEqual(['forbidden']);
+  });
+
+  it('posts the summary in the new live channel when the old one became unreachable after the admin moved it', async () => {
+    const { notifier, transport } = setup();
+    const moved = '444444444444444444';
+    transport.push({ ok: false, reason: 'forbidden', detail: 'Missing Access' });
+    expect(await notifier.postSummary(REF, summary({ liveChannelId: moved }))).toEqual({ status: 'done', ref: { channelId: moved, messageId: 'm1' } });
+    expect(transport.calls.map((c) => [c.op, c.channelId])).toEqual([
+      ['edit', LIVE_CHANNEL],
+      ['send', moved],
+    ]);
+  });
+
+  it('falls back to the minimal ended card when Discord refuses the full summary, so the LIVE card never stays', async () => {
+    const { notifier, transport } = setup();
+    transport.push({ ok: false, reason: 'invalid', detail: '50035 embeds.0.image.url' });
+    expect(await notifier.postSummary(REF, summary())).toEqual({ status: 'done', ref: REF });
+    expect(transport.calls.map((c) => [c.op, c.message.embeds[0]!.title])).toEqual([
+      ['edit', '⚫ انتهى بث أبو فهد'],
+      ['edit', '⚫ انتهى البث'],
+    ]);
   });
 
   it('posts a new summary when there was no live message', async () => {
     const { notifier, transport } = setup();
-    expect(await notifier.postSummary(null, summary())).toEqual({ channelId: LIVE_CHANNEL, messageId: 'm1' });
+    expect(await notifier.postSummary(null, summary())).toEqual({ status: 'done', ref: { channelId: LIVE_CHANNEL, messageId: 'm1' } });
     expect(transport.calls[0]!.op).toBe('send');
   });
 
-  it('with summaries disabled: edits to a minimal ended card and never posts a new message', async () => {
+  it("reports 'transient' when posting a new summary fails transiently", async () => {
     const { notifier, transport } = setup();
-    expect(await notifier.postSummary(REF, summary({ options: { ...settings().options, summaryEnabled: false } }))).toEqual(REF);
+    transport.push({ ok: false, reason: 'error', detail: 'timeout' });
+    expect(await notifier.postSummary(null, summary())).toEqual({ status: 'transient', reason: 'error' });
+  });
+
+  it("with summaries disabled: edits to a minimal ended card and never posts a new message ('skipped')", async () => {
+    const { notifier, transport } = setup();
+    expect(await notifier.postSummary(REF, summary(disabled))).toEqual({ status: 'done', ref: REF });
     expect(transport.calls[0]!.message.embeds[0]!.title).toBe('⚫ انتهى البث');
 
     transport.push({ ok: false, reason: 'gone', detail: 'Unknown Message' });
-    expect(await notifier.postSummary(REF, summary({ options: { ...settings().options, summaryEnabled: false } }))).toBeNull();
+    expect(await notifier.postSummary(REF, summary(disabled))).toEqual({ status: 'skipped' });
     expect(transport.calls.map((c) => c.op)).toEqual(['edit', 'edit']);
   });
 
-  it('returns null without a ref and without a channel', async () => {
+  it("is 'skipped' without a ref and without a channel", async () => {
     const { notifier, transport } = setup();
-    expect(await notifier.postSummary(null, summary({ liveChannelId: null }))).toBeNull();
+    expect(await notifier.postSummary(null, summary({ liveChannelId: null }))).toEqual({ status: 'skipped' });
     expect(transport.calls).toHaveLength(0);
+  });
+
+  describe('expiring (TikTok) images', () => {
+    const cover = 'https://p16-webcast.tiktokcdn.com/img/cover.webp?x-expires=1791000000&x-signature=abc';
+    const image = () => vi.fn<ImageFetcher>(async () => ({ data: Buffer.from('img'), contentType: 'image/webp' }));
+
+    it('uploads the image with the edit, so the permanent summary keeps it after the signed URL expires', async () => {
+      const fetchImage = image();
+      const { notifier, transport } = setup({ fetchImage });
+      expect(await notifier.postSummary(REF, summary({}, { imageUrl: cover }))).toEqual({ status: 'done', ref: REF });
+      expect(fetchImage).toHaveBeenCalledWith(cover);
+      const { op, message } = transport.calls[0]!;
+      expect(op).toBe('edit');
+      expect(message.files).toEqual([{ name: 'image-0.webp', data: Buffer.from('img') }]);
+      expect(message.embeds[0]!.image).toEqual({ url: 'attachment://image-0.webp' });
+    });
+
+    it('uploads the image with a newly posted summary too', async () => {
+      const { notifier, transport } = setup({ fetchImage: image() });
+      transport.push({ ok: false, reason: 'gone', detail: 'Unknown Message' });
+      await notifier.postSummary(REF, summary({}, { imageUrl: cover }));
+      expect(transport.calls.map((c) => [c.op, c.message.files?.length ?? 0])).toEqual([
+        ['edit', 1],
+        ['send', 1],
+      ]);
+    });
+
+    it('edits with the linked image when the bot may not upload files', async () => {
+      const { notifier, transport, deliveryWarnings } = setup({ fetchImage: image() });
+      transport.push({ ok: false, reason: 'forbidden', detail: 'missing AttachFiles', missing: ['AttachFiles'] });
+      expect(await notifier.postSummary(REF, summary({}, { imageUrl: cover }))).toEqual({ status: 'done', ref: REF });
+      expect(transport.calls[1]!.message.files).toBeUndefined();
+      expect(transport.calls[1]!.message.embeds[0]!.image).toEqual({ url: cover });
+      expect(deliveryWarnings()[0]!.message).toContain('إرفاق الملفات (Attach Files)');
+    });
   });
 });
 
@@ -210,6 +306,45 @@ describe('postContent', () => {
     expect(sent.embeds[0]!.image).toEqual({ url: 'attachment://image-0.webp' });
   });
 
+  it('falls back to the linked image when Discord refuses the upload (no Attach Files), and says so', async () => {
+    const fetchImage = vi.fn<ImageFetcher>(async () => ({ data: Buffer.from('img'), contentType: 'image/webp' }));
+    const { notifier, transport, deliveryWarnings, advance } = setup({ fetchImage });
+    const cover = 'https://p16-sign-va.tiktokcdn.com/obj/cover.webp?x-expires=1791000000&x-signature=abc';
+    const view = contentView(
+      {
+        settings: settings({ contentChannelId: CONTENT_CHANNEL }),
+        channel: { id: 21, platform: 'tiktok', displayName: 'Abu Fahad', handle: 'abufahad', url: 'https://www.tiktok.com/@abufahad', avatarUrl: null },
+      },
+      { platform: 'tiktok', platformId: 'abufahad', contentId: '7300000000000000000', url: 'https://www.tiktok.com/@abufahad/video/7300000000000000000', thumbnailUrl: cover },
+    );
+    // Discord's own 50013 (no pre-check detail) and the transport pre-check both fall back.
+    transport.push({ ok: false, reason: 'forbidden', detail: '50013 Missing Permissions' });
+    expect(await notifier.postContent(view)).toEqual({ channelId: CONTENT_CHANNEL, messageId: 'm2' });
+    const [upload, plain] = transport.calls;
+    expect(upload!.message.files).toHaveLength(1);
+    expect(plain!.message.files).toBeUndefined();
+    expect(plain!.message.embeds[0]!.image).toEqual({ url: cover });
+    const warnings = deliveryWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('إرفاق الملفات (Attach Files)');
+    expect(warnings[0]!.message).not.toContain('Embed Links');
+
+    advance(60 * 60_000);
+    transport.push({ ok: false, reason: 'forbidden', detail: 'missing AttachFiles', missing: ['AttachFiles'] });
+    expect(await notifier.postContent(view)).not.toBeNull();
+    expect(deliveryWarnings()).toHaveLength(2);
+  });
+
+  it('does not resend without files when other posting permissions are missing too', async () => {
+    const fetchImage = vi.fn<ImageFetcher>(async () => ({ data: Buffer.from('img'), contentType: 'image/webp' }));
+    const { notifier, transport } = setup({ fetchImage });
+    const cover = 'https://p16-sign-va.tiktokcdn.com/obj/cover.webp?x-expires=1791000000&x-signature=abc';
+    const view = contentView({ settings: settings({ contentChannelId: CONTENT_CHANNEL }) }, { thumbnailUrl: cover });
+    transport.push({ ok: false, reason: 'forbidden', detail: 'missing', missing: ['SendMessages', 'AttachFiles'] });
+    expect(await notifier.postContent(view)).toBeNull();
+    expect(transport.calls).toHaveLength(1);
+  });
+
   it('keeps the linked image when the download fails, and never downloads stable CDN images', async () => {
     const fetchImage = vi.fn<ImageFetcher>(async () => null);
     const { notifier, transport } = setup({ fetchImage });
@@ -229,6 +364,16 @@ describe('custom emoji fallback', () => {
     const [first, second] = transport.calls;
     expect(first!.message.components[0]!.components[0]!.emoji).toEqual({ id: '123456789012345678', name: 'twitch' });
     expect(second!.message.components[0]!.components[0]!.emoji).toEqual({ name: '💜' });
+  });
+
+  it('keeps the custom emojis when the unicode retry is refused too (the 400 had nothing to do with emojis)', async () => {
+    const emojis = resolvePlatformEmojis([{ id: '123456789012345678', name: 'twitch' }]);
+    const { notifier, transport, rejected } = setup({ emojis });
+    const invalid = { ok: false as const, reason: 'invalid' as const, detail: '50035 embeds.0.image.url: Not a well formed URL' };
+    transport.push(invalid, invalid);
+    expect(await notifier.postLive(live())).toBeNull();
+    expect(transport.calls).toHaveLength(2);
+    expect(rejected).not.toHaveBeenCalled();
   });
 
   it('does not retry an invalid payload when only unicode emojis were used', async () => {
@@ -295,10 +440,12 @@ describe('helpers', () => {
     expect(message.allowedMentions).toEqual({ parse: [], repliedUser: false });
   });
 
-  it('explains configuration failures in Arabic and ignores transient ones', () => {
+  it('explains configuration and Discord delivery failures in Arabic, but not a client that is still connecting', () => {
     expect(failureMessageAr({ ok: false, reason: 'channel_missing', detail: '' }, 'content', CONTENT_CHANNEL)).toContain('روم إشعارات المقاطع');
     expect(failureMessageAr({ ok: false, reason: 'wrong_guild', detail: '' }, 'live', LIVE_CHANNEL)).toContain('سيرفر ثاني');
-    expect(failureMessageAr({ ok: false, reason: 'error', detail: '' }, 'live', LIVE_CHANNEL)).toBeNull();
+    expect(failureMessageAr({ ok: false, reason: 'error', detail: '', channelName: 'live' }, 'live', LIVE_CHANNEL)).toBe(
+      'تعذّر إيصال رسالة إشعارات البث (#live) لديسكورد — غالباً خلل مؤقت في ديسكورد أو الشبكة',
+    );
     expect(failureMessageAr({ ok: false, reason: 'not_ready', detail: '' }, 'live', LIVE_CHANNEL)).toBeNull();
   });
 });

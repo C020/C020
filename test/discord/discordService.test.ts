@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { type Client, Events } from 'discord.js';
+import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../src/config.js';
 import { ValidationError } from '../../src/core/errors.js';
 import { DiscordService, startupError } from '../../src/discord/discordService.js';
@@ -72,6 +73,34 @@ describe('DiscordService (no gateway)', () => {
     const { discord } = service();
     const result = await discord.diagnose(GUILD, settings());
     expect(result.problems.map((p) => p.code)).toEqual(['discord_not_ready']);
+  });
+
+  it('notifies gateway recovery listeners once per resume/re-identify burst, never for the first READY', async () => {
+    vi.useFakeTimers();
+    const { discord } = service();
+    const listener = vi.fn();
+    discord.onGatewayRecovered(listener);
+    const internals = discord as unknown as { createClient(): Client; initialReady: boolean };
+    const client = internals.createClient();
+    try {
+      client.emit(Events.ShardReady, 0, undefined); // initial login
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listener).not.toHaveBeenCalled();
+
+      internals.initialReady = true; // ClientReady arrived
+      client.emit(Events.ShardResume, 0, 12);
+      client.emit(Events.ShardReady, 0, undefined);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      client.emit(Events.ShardResume, 0, 3);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listener).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.destroy();
+      await discord.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('reports transient outcomes from the notifier while offline instead of throwing', async () => {

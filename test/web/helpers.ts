@@ -22,7 +22,15 @@ import type { StreamerWithAccounts, WebSessionGuild } from '../../src/db/models.
 import { Repositories } from '../../src/db/repositories.js';
 import type { PlatformProvider, WebhookAdapter } from '../../src/platforms/types.js';
 import { AuditService } from '../../src/services/audit.js';
-import type { DiscordGuildInfo, DiscordMemberInfo, MessageRef } from '../../src/services/ports.js';
+import type {
+  DiscordGuildInfo,
+  DiscordMemberInfo,
+  DiscordRoleInfo,
+  EditOutcome,
+  MessageRef,
+  RoleChangeOutcome,
+  SummaryOutcome,
+} from '../../src/services/ports.js';
 import { csrfTokenFor, randomToken, sessionIdFromToken } from '../../src/web/csrf.js';
 import { createWebServer, type WebServer } from '../../src/web/server.js';
 import type { WebServerOptions } from '../../src/web/types.js';
@@ -82,9 +90,9 @@ export class FakeDiscord implements DiscordApi {
     { id: OTHER_GUILD, name: 'Other', iconUrl: null, memberCount: 5 },
   ];
   readonly members = new Map<string, DiscordMemberInfo>();
-  roleList = [
-    { id: ROLE_A, name: 'Streamer', color: 0, position: 2, managed: false, assignable: true },
-    { id: ROLE_B, name: 'Live', color: 0, position: 3, managed: false, assignable: true },
+  roleList: DiscordRoleInfo[] = [
+    { id: ROLE_A, name: 'Streamer', color: 0, position: 2, managed: false, assignable: true, permissions: '0', elevated: false },
+    { id: ROLE_B, name: 'Live', color: 0, position: 3, managed: false, assignable: true, permissions: '0', elevated: false },
   ];
   channelList = [{ id: CHANNEL_A, name: 'live', type: 'text' as const, parentName: null, botCanPost: true }];
 
@@ -94,6 +102,7 @@ export class FakeDiscord implements DiscordApi {
   }));
   readonly preview = vi.fn(async () => ({ content: null, embeds: [{ title: 'معاينة' }], buttons: [] }));
   readonly fetchMember = vi.fn(async (guildId: string, userId: string) => this.members.get(`${guildId}:${userId}`) ?? null);
+  readonly removeRoleFrom = vi.fn(async (_guildId: string, _roleId: string, _userIds: string[], _reason: string): Promise<void> => {});
 
   addMember(guildId: string, id: string, displayName: string): void {
     this.members.set(`${guildId}:${id}`, {
@@ -139,18 +148,22 @@ export class FakeDiscord implements DiscordApi {
   async postLive() {
     return null;
   }
-  async updateLive() {
-    return true;
+  async updateLive(): Promise<EditOutcome> {
+    return 'ok';
   }
-  async postSummary() {
-    return null;
+  async postSummary(): Promise<SummaryOutcome> {
+    return { status: 'skipped' };
   }
   async postContent() {
     return null;
   }
   async log() {}
-  async setLive() {}
-  async setStreamer() {}
+  async setLive(): Promise<RoleChangeOutcome> {
+    return 'noop';
+  }
+  async setStreamer(): Promise<RoleChangeOutcome> {
+    return 'noop';
+  }
   async reconcile() {
     return { added: 0, removed: 0 };
   }
@@ -314,8 +327,9 @@ export interface Login {
   headers: Record<string, string>;
 }
 
+/** A guild the user manages: Manage Server + Manage Roles by default (role settings also need Manage Roles). */
 export function manageable(id: string, opts: Partial<WebSessionGuild> = {}): WebSessionGuild {
-  return { id, name: `guild ${id}`, icon: null, owner: false, permissions: String(0x20), ...opts };
+  return { id, name: `guild ${id}`, icon: null, owner: false, permissions: String(0x20 | 0x10000000), ...opts };
 }
 
 /** Creates a dashboard session directly in the DB (bypassing OAuth). */

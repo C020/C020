@@ -68,6 +68,35 @@ describe('DiscordTransport', () => {
     expect(channel.edits[0]!.payload.allowedMentions).toEqual({ parse: [], repliedUser: false });
   });
 
+  it('uploads files only with Attach Files (pre-checked for sends and edits)', async () => {
+    const withFiles: OutgoingMessage = { ...message(), files: [{ name: 'image-0.webp', data: Buffer.from('img') }] };
+    const { transport, channel } = setup();
+    expect(await transport.send(GUILD, CHANNEL, withFiles)).toMatchObject({ ok: false, reason: 'forbidden', missing: ['AttachFiles'] });
+    expect(await transport.edit(GUILD, { channelId: CHANNEL, messageId: '900000000000000005' }, withFiles)).toMatchObject({
+      ok: false,
+      reason: 'forbidden',
+      missing: ['AttachFiles'],
+    });
+    expect(channel.sent).toHaveLength(0);
+    expect(channel.edits).toHaveLength(0);
+    // Without files the same channel is fine.
+    expect(await transport.send(GUILD, CHANNEL, message())).toMatchObject({ ok: true });
+  });
+
+  it('edits upload new files and replace earlier attachments', async () => {
+    const { transport, channel } = setup([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.AttachFiles]);
+    const ref = { channelId: CHANNEL, messageId: '900000000000000005' };
+    const withFiles: OutgoingMessage = { ...message(), files: [{ name: 'image-0.webp', data: Buffer.from('img') }] };
+    expect(await transport.edit(GUILD, ref, withFiles)).toMatchObject({ ok: true });
+    expect(channel.edits[0]!.payload.files).toEqual([{ attachment: Buffer.from('img'), name: 'image-0.webp' }]);
+    expect(channel.edits[0]!.payload.attachments).toEqual([]);
+    // A later edit without files drops the earlier upload instead of keeping it next to the new embed.
+    await transport.edit(GUILD, ref, message());
+    expect(channel.edits[1]!.payload.files).toBeUndefined();
+    expect(channel.edits[1]!.payload.attachments).toEqual([]);
+    expect(channel.edits[0]!.payload.attachments).not.toBe(channel.edits[1]!.payload.attachments);
+  });
+
   it('reports a deleted message as gone', async () => {
     const { transport, channel } = setup();
     channel.editError = Object.assign(new Error('Unknown Message'), { code: 10008 });
@@ -94,14 +123,22 @@ describe('DiscordLookups', () => {
     guild.addRole('700000000000000001', 'Streamer', 5);
     guild.addRole('700000000000000002', 'Admins', 20);
     guild.addRole('700000000000000003', 'Bot Role', 3, { managed: true });
+    guild.addRole('700000000000000004', 'Mods', 4, { permissions: PermissionFlagsBits.ManageMessages | PermissionFlagsBits.SendMessages });
+    guild.addRole('700000000000000005', 'Members', 2, { permissions: PermissionFlagsBits.SendMessages | PermissionFlagsBits.AttachFiles });
     const roles = await gateway.roles(GUILD);
     expect(roles.map((r) => [r.name, r.assignable])).toEqual([
       ['Admins', false],
       ['StreamBot', false],
       ['Streamer', true],
+      ['Mods', true],
       ['Bot Role', false],
+      ['Members', true],
     ]);
     expect(roles[0]!.color).toBe(0x123456);
+    const byName = Object.fromEntries(roles.map((r) => [r.name, r]));
+    expect(byName.Mods).toMatchObject({ elevated: true, permissions: (PermissionFlagsBits.ManageMessages | PermissionFlagsBits.SendMessages).toString() });
+    expect(byName.Members).toMatchObject({ elevated: false, permissions: (PermissionFlagsBits.SendMessages | PermissionFlagsBits.AttachFiles).toString() });
+    expect(byName.Streamer).toMatchObject({ elevated: false, permissions: '0' });
   });
 
   it('lists text and announcement channels with posting ability, ordered by category', async () => {
@@ -153,7 +190,12 @@ describe('DiscordLookups', () => {
     );
     expect(result.botInGuild).toBe(true);
     expect(result.botHasManageRoles).toBe(true);
-    expect(result.problems.map((p) => p.code)).toEqual(['live_role_above_bot', 'content_channel_no_permission', 'members_intent']);
+    // TikTok is enabled by default: without Attach Files its expiring images would be sent as links (a warning only).
+    expect(result.problems.map((p) => p.code)).toEqual(['live_role_above_bot', 'live_channel_no_attach_files', 'content_channel_no_permission', 'members_intent']);
+    expect(result.problems.find((p) => p.code === 'live_channel_no_attach_files')).toMatchObject({ level: 'warn' });
+    guild.members.me!.permissionSet.add(PermissionFlagsBits.AttachFiles);
+    const fixed = await gateway.diagnose(GUILD, settings({ liveChannelId: CHANNEL }));
+    expect(fixed.problems.map((p) => p.code)).not.toContain('live_channel_no_attach_files');
   });
 
   it('diagnoses a guild the bot is not in', async () => {

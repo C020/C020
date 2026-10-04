@@ -46,6 +46,8 @@ const BOT_USER_AGENT = 'StreamBot/1.0 (+discord bot)';
 const DEFAULT_COOKIES: ReadonlyArray<[string, string]> = [['tt-target-idc', 'useast1a']];
 
 const KV_BREAKER = 'tiktok:breaker';
+/** handle -> last time this provider saw the account live; keeps the user_not_found contradiction window across restarts. */
+const KV_LAST_LIVE = 'tiktok:lastLive';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -1000,6 +1002,7 @@ export class TikTokProvider implements PlatformProvider {
   private readonly web: TikTokWeb;
   private readonly euler: EulerClient | null;
   private readonly rsshubUrl: string | null;
+  private readonly kv: SafeKv;
   private readonly lastLiveAt = new Map<string, number>();
   private readonly neverLiveCheckedAt = new Map<string, number>();
   private readonly oembedCache = new Map<string, { title: string | null; thumbnailUrl: string | null }>();
@@ -1020,7 +1023,9 @@ export class TikTokProvider implements PlatformProvider {
     const minGap = Math.min(maxGap, Math.max(0, options.minRequestGapMs ?? DEFAULT_MIN_GAP_MS));
     const throttle = new Throttle(minGap, maxGap, this.now, options.random ?? Math.random, options.sleep ?? sleepMs);
 
-    this.breaker = new BlockBreaker(new SafeKv(ctx.kv, this.logger), this.now, this.logger);
+    this.kv = new SafeKv(ctx.kv, this.logger);
+    this.breaker = new BlockBreaker(this.kv, this.now, this.logger);
+    this.loadLastLive();
     this.web = new TikTokWeb(this.fetchImpl, throttle, this.breaker);
     this.breaker.onTrip = () => this.web.resetIdentity();
 
@@ -1231,22 +1236,17 @@ export class TikTokProvider implements PlatformProvider {
   }
 
   private shouldConfirmNeverLive(handle: string): boolean {
-    const now = this.now();
-    const lastLive = this.lastLiveAt.get(handle);
-    if (lastLive !== undefined && now - lastLive < CONTRADICTION_WINDOW_MS) return true;
+    if (this.wasRecentlyLive(handle)) return true;
+    // The first user_not_found this process sees (e.g. right after a restart) is cross-checked immediately;
+    // confirmNeverLive records the check, so later ones are cross-checked every NEVER_LIVE_RECHECK_MS.
     const lastCheck = this.neverLiveCheckedAt.get(handle);
-    if (lastCheck === undefined) {
-      this.neverLiveCheckedAt.set(handle, now);
-      return false;
-    }
-    return now - lastCheck >= NEVER_LIVE_RECHECK_MS;
+    return lastCheck === undefined || this.now() - lastCheck >= NEVER_LIVE_RECHECK_MS;
   }
 
   /** Returns the verdict for a user_not_found answer, or null when it contradicts recent evidence and stays unconfirmed. */
   private async confirmNeverLive(channel: ChannelRef, handle: string, crossCheck: boolean): Promise<LiveSnapshot | null> {
     if (!crossCheck) return this.offline(channel, handle);
-    const now = this.now();
-    this.neverLiveCheckedAt.set(handle, now);
+    this.neverLiveCheckedAt.set(handle, this.now());
     if (!this.breaker.isOpen()) {
       const page = await this.livePage(handle);
       if (page.kind === 'room') {
@@ -1254,8 +1254,7 @@ export class TikTokProvider implements PlatformProvider {
         if (snapshot) return snapshot;
       }
     }
-    const lastLive = this.lastLiveAt.get(handle);
-    if (lastLive !== undefined && now - lastLive < CONTRADICTION_WINDOW_MS) return null;
+    if (this.wasRecentlyLive(handle)) return null;
     return this.offline(channel, handle);
   }
 
@@ -1289,24 +1288,41 @@ export class TikTokProvider implements PlatformProvider {
     return lastLive !== undefined && this.now() - lastLive < CONTRADICTION_WINDOW_MS;
   }
 
+  /** Loads the persisted last-live times, dropping the ones already outside the contradiction window. */
+  private loadLastLive(): void {
+    const stored = this.kv.get<Record<string, unknown>>(KV_LAST_LIVE);
+    if (!isRecord(stored)) return;
+    const now = this.now();
+    for (const [handle, value] of Object.entries(stored)) {
+      const at = num(value);
+      if (at !== null && now - at < CONTRADICTION_WINDOW_MS) this.lastLiveAt.set(handle, at);
+    }
+  }
+
+  private markLive(handle: string, now: number): void {
+    this.lastLiveAt.set(handle, now);
+    const record: Record<string, number> = {};
+    for (const [key, at] of this.lastLiveAt) {
+      if (now - at < CONTRADICTION_WINDOW_MS) record[key] = at;
+      else this.lastLiveAt.delete(key);
+    }
+    this.kv.set(KV_LAST_LIVE, record);
+  }
+
   private async checkViaEuler(euler: EulerClient, channel: ChannelRef, handle: string): Promise<LiveSnapshot | string> {
     const result = await euler.liveStatus(handle);
     if (result.kind === 'error') return result.reason;
     if (!result.isLive) return this.offline(channel, handle);
-    let room: RoomState = { ...EMPTY_ROOM, status: result.roomStatus !== null && LIVE_STATUSES.has(result.roomStatus) ? result.roomStatus : 2, roomId: result.roomId };
-    if (result.roomId && !this.breaker.isOpen()) {
-      const info = await this.roomInfo(result.roomId);
-      if (info.kind === 'ok') {
-        if (info.room.status === ENDED_STATUS) return this.offline(channel, handle);
-        room = mergeRoom(room, info.room);
-      }
-    }
-    return this.liveSnapshot(channel, handle, room, null);
+    // is_live alone is not proof: the direct path's status-2 and room-owner (guest) rules apply here too.
+    // Only a missing room_status falls back to Euler's own verdict (status 2).
+    const room: RoomState = { ...EMPTY_ROOM, status: result.roomStatus ?? 2, roomId: result.roomId };
+    const snapshot = await this.snapshotFromRoom(channel, handle, { kind: 'room', profile: null, room });
+    return snapshot ?? `ambiguous room status ${room.status ?? 'null'}`;
   }
 
   private liveSnapshot(channel: ChannelRef, handle: string, room: RoomState, profile: TikTokProfile | null): LiveSnapshot {
     const now = this.now();
-    this.lastLiveAt.set(handle, now);
+    this.markLive(handle, now);
     this.neverLiveCheckedAt.delete(handle);
     return {
       platform: 'tiktok',

@@ -442,6 +442,42 @@ describe('checkLive', () => {
     expect(api.helix('GET /games')).toHaveLength(2);
   });
 
+  it('follows the Get Streams cursor when Twitch returns a short page', async () => {
+    const api = fakeTwitch({
+      'GET /streams': (call) => {
+        const after = call.url.searchParams.get('after');
+        if (!after) return json({ data: [stream('100', 'alpha')], pagination: { cursor: 'page-2' } });
+        if (after === 'page-2') return json({ data: [stream('200', 'beta')], pagination: { cursor: 'page-3' } });
+        return json({ data: [], pagination: { cursor: 'page-4' } });
+      },
+      'GET /games': () => json({ data: [] }),
+    });
+
+    const snapshots = await makeProvider(api.fetchImpl).checkLive(channels);
+
+    expect(snapshots.map((s) => s.isLive)).toEqual([true, true, false]);
+    const calls = api.helix('GET /streams');
+    expect(calls.map((c) => c.url.searchParams.get('after'))).toEqual([null, 'page-2', 'page-3']);
+    expect(calls.every((c) => c.url.searchParams.getAll('user_id').length === 3 && c.url.searchParams.get('first') === '100')).toBe(true);
+  });
+
+  it('caps the Get Streams pagination and stops once every channel is accounted for', async () => {
+    let n = 0;
+    const endless = fakeTwitch({
+      'GET /streams': () => json({ data: [stream(String(100 + 100 * (n++ % 2)), 'x')], pagination: { cursor: `c${n}` } }),
+      'GET /games': () => json({ data: [] }),
+    });
+    await makeProvider(endless.fetchImpl).checkLive(channels);
+    expect(endless.helix('GET /streams')).toHaveLength(3);
+
+    const allLive = fakeTwitch({
+      'GET /streams': () => json({ data: [stream('100', 'alpha'), stream('200', 'beta'), stream('300', 'gamma')], pagination: { cursor: 'more' } }),
+      'GET /games': () => json({ data: [] }),
+    });
+    expect((await makeProvider(allLive.fetchImpl).checkLive(channels)).every((s) => s.isLive)).toBe(true);
+    expect(allLive.helix('GET /streams')).toHaveLength(1);
+  });
+
   it('keeps snapshots when box art lookup fails', async () => {
     const api = fakeTwitch({
       'GET /streams': () => json({ data: [stream('100', 'alpha')] }),

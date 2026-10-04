@@ -308,6 +308,21 @@ const verifyRequest = (mode: string, channelId: string, extra: Record<string, st
   rawBody: Buffer.alloc(0),
 });
 
+/** hub.verify_token of the adapter's last hub request of this mode for the channel (Google's hub echoes it). */
+function hubToken(fake: Fake, mode: 'subscribe' | 'unsubscribe', channelId: string): string {
+  const form = fake
+    .hubCalls()
+    .map((call) => new URLSearchParams(call.body ?? ''))
+    .filter((f) => f.get('hub.mode') === mode && f.get('hub.topic') === websubTopic(channelId))
+    .at(-1);
+  if (!form) throw new Error(`no ${mode} request for ${channelId}`);
+  return form.get('hub.verify_token')!;
+}
+
+/** The hub's verification GET for our last request (with the echoed token). */
+const hubVerification = (fake: Fake, mode: 'subscribe' | 'unsubscribe', channelId: string, extra: Record<string, string> = {}) =>
+  verifyRequest(mode, channelId, { 'hub.verify_token': hubToken(fake, mode, channelId), ...extra });
+
 // ───────────────────────────── pure helpers ─────────────────────────────
 
 describe('parseYouTubeInput', () => {
@@ -642,8 +657,73 @@ describe('checkLive', () => {
 
     c.advance(2 * MIN);
     fake.videos.delete(vid(1));
+    // One answer without it is not proof yet; the next one is.
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(true);
+    c.advance(2 * MIN);
     expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
     expect(await provider.findVodUrl(channel(CH1), vid(1))).toBeNull();
+  });
+
+  it('keeps a live stream that one videos.list answer leaves out, and rediscovers one that was private for a while', async () => {
+    const fake = fakeYouTube();
+    fake.setFeed(CH1, [{ id: vid(1) }]);
+    const live = liveVideo(vid(1), CH1);
+    fake.videos.set(vid(1), live);
+    const { provider, clock: c } = makeProvider(fake);
+    const forceRss = () => ((provider as unknown as { rss: Map<string, { nextAt: number }> }).rss.get(CH1)!.nextAt = 0);
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(true);
+
+    // A single answer without the stream (API inconsistency): still live, and the next answer has it again.
+    c.advance(MIN);
+    fake.videos.delete(vid(1));
+    fake.reset();
+    expect((await provider.checkLive([channel(CH1)]))[0]).toMatchObject({ isLive: true, streamId: vid(1) });
+    expect(fake.apiCalls('videos')).toHaveLength(1);
+    c.advance(MIN);
+    fake.videos.set(vid(1), live);
+    expect((await provider.checkLive([channel(CH1)]))[0]).toMatchObject({ isLive: true, streamId: vid(1) });
+    // The counter was reset: one more lone miss is tolerated again.
+    c.advance(MIN);
+    fake.videos.delete(vid(1));
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(true);
+
+    // Missing from two answers in a row (made private): given up, without a VOD...
+    c.advance(MIN);
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
+    expect(await provider.findVodUrl(channel(CH1), vid(1))).toBeNull();
+
+    // ...but listed and classified again once it is public again.
+    c.advance(MIN);
+    fake.videos.set(vid(1), live);
+    forceRss();
+    expect((await provider.checkLive([channel(CH1)]))[0]).toMatchObject({ isLive: true, streamId: vid(1) });
+
+    // When it ends, its VOD is offered (the earlier "vanished" verdict was dropped).
+    c.advance(MIN);
+    fake.videos.set(vid(1), endedVideo(vid(1), CH1, { started: iso(-HOUR), ended: iso(5 * MIN) }));
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
+    expect(await provider.findVodUrl(channel(CH1), vid(1))).toBe(`https://www.youtube.com/watch?v=${vid(1)}`);
+  });
+
+  it('offers the VOD of a stream given up as vanished that is rediscovered only after it ended', async () => {
+    const fake = fakeYouTube();
+    fake.setFeed(CH1, [{ id: vid(1) }]);
+    fake.videos.set(vid(1), liveVideo(vid(1), CH1));
+    const { provider, clock: c } = makeProvider(fake);
+    const forceRss = () => ((provider as unknown as { rss: Map<string, { nextAt: number }> }).rss.get(CH1)!.nextAt = 0);
+    await provider.checkLive([channel(CH1)]);
+    fake.videos.delete(vid(1));
+    for (let i = 0; i < 2; i++) {
+      c.advance(MIN);
+      await provider.checkLive([channel(CH1)]);
+    }
+    expect(await provider.findVodUrl(channel(CH1), vid(1))).toBeNull();
+
+    c.advance(30 * MIN);
+    fake.videos.set(vid(1), endedVideo(vid(1), CH1, { started: iso(-HOUR), ended: iso(20 * MIN) }));
+    forceRss();
+    await provider.checkLive([channel(CH1)]);
+    expect(await provider.findVodUrl(channel(CH1), vid(1))).toBe(`https://www.youtube.com/watch?v=${vid(1)}`);
   });
 
   it('re-checks far-future schedules slowly and imminent ones on every poll until they go live', async () => {
@@ -674,6 +754,77 @@ describe('checkLive', () => {
     c.t = Date.parse(start) + MIN;
     fake.videos.set(vid(1), liveVideo(vid(1), CH1, { started: start }));
     expect((await provider.checkLive([channel(CH1)]))[0]).toMatchObject({ isLive: true, streamId: vid(1), startedAt: start });
+  });
+
+  it('re-checks a tracked stream right after a WebSub push about it, even far from its schedule', async () => {
+    const fake = fakeYouTube();
+    const start = iso(3 * HOUR);
+    fake.setFeed(CH1, [{ id: vid(1) }]);
+    fake.videos.set(vid(1), upcomingVideo(vid(1), CH1, start));
+    const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
+    const hook = provider.webhook!;
+    await hook.sync([channel(CH1)]);
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
+
+    // Without a push the far-future schedule is not re-checked for 15 min.
+    c.advance(MIN);
+    fake.reset();
+    await provider.checkLive([channel(CH1)]);
+    expect(fake.apiCalls('videos')).toHaveLength(0);
+
+    // The streamer starts 2 h 58 min early; YouTube pushes an edit of the (old-published) video.
+    c.advance(MIN);
+    const push = await hook.handle(signedPost(pushXml(CH1, vid(1), iso(-DAY), iso(2 * MIN))));
+    expect(push.hints).toEqual([{ type: 'live', platform: 'youtube', platformId: CH1 }]);
+    // The API has not caught up yet when the monitor's targeted check runs 2 s later...
+    c.advance(2 * SEC);
+    fake.reset();
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
+    expect(fake.apiCalls('videos')).toHaveLength(1);
+    // ...but the follow-up 20 s later checks again and sees it live.
+    c.advance(18 * SEC);
+    fake.videos.set(vid(1), liveVideo(vid(1), CH1, { started: iso(2 * MIN) }));
+    fake.reset();
+    expect((await provider.checkLive([channel(CH1)]))[0]).toMatchObject({ isLive: true, streamId: vid(1) });
+    expect(fake.apiCalls('videos')).toHaveLength(1);
+  });
+
+  it('stops following up on a push after a few minutes and never re-checks more often than every 15 s', async () => {
+    const fake = fakeYouTube();
+    fake.setFeed(CH1, [{ id: vid(1) }]);
+    fake.videos.set(vid(1), upcomingVideo(vid(1), CH1, iso(3 * HOUR)));
+    const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
+    const hook = provider.webhook!;
+    await hook.sync([channel(CH1)]);
+    await provider.checkLive([channel(CH1)]);
+
+    c.advance(MIN);
+    await hook.handle(signedPost(pushXml(CH1, vid(1), iso(-DAY), iso(MIN))));
+    fake.reset();
+    await provider.checkLive([channel(CH1)]);
+    c.advance(5 * SEC);
+    await provider.checkLive([channel(CH1)]); // too soon after the last check
+    expect(fake.apiCalls('videos')).toHaveLength(1);
+
+    c.advance(4 * MIN); // the push window is over: back to the slow schedule
+    fake.reset();
+    await provider.checkLive([channel(CH1)]);
+    expect(fake.apiCalls('videos')).toHaveLength(0);
+  });
+
+  it('drops a live stream on the first check that misses it after a WebSub tombstone', async () => {
+    const fake = fakeYouTube();
+    fake.setFeed(CH1, [{ id: vid(1) }]);
+    fake.videos.set(vid(1), liveVideo(vid(1), CH1));
+    const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
+    const hook = provider.webhook!;
+    await hook.sync([channel(CH1)]);
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(true);
+
+    c.advance(5 * SEC);
+    fake.videos.delete(vid(1));
+    expect((await hook.handle(signedPost(deletedXml(CH1, vid(1))))).hints).toEqual([{ type: 'live', platform: 'youtube', platformId: CH1 }]);
+    expect((await provider.checkLive([channel(CH1)]))[0]!.isLive).toBe(false);
   });
 
   it('never reports Premieres as live and announces them as videos once they play', async () => {
@@ -844,7 +995,7 @@ describe('fetchRecentContent', () => {
     fake.setFeed(CH1, []);
     const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
     await provider.webhook!.sync([channel(CH1)]);
-    provider.webhook!.handle(verifyRequest('subscribe', CH1, { 'hub.lease_seconds': '432000' }));
+    await provider.webhook!.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '432000' }));
     await provider.fetchRecentContent(channel(CH1), ['short']); // baseline (empty channel)
 
     fake.videos.set(vid(7), upload(vid(7), CH1, { duration: 'PT30S', vertical: true, published: iso(-MIN) }));
@@ -1136,8 +1287,8 @@ describe('WebSub', () => {
     const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
     const hook = provider.webhook!;
     await hook.sync([channel(CH1), channel(CH2)]);
-    await hook.handle(verifyRequest('subscribe', CH1, { 'hub.lease_seconds': '400000' }));
-    await hook.handle(verifyRequest('subscribe', CH2, { 'hub.lease_seconds': '400000' }));
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '400000' }));
+    await hook.handle(hubVerification(fake, 'subscribe', CH2, { 'hub.lease_seconds': '400000' }));
 
     fake.reset();
     c.advance(200_000 * SEC); // 50% left
@@ -1152,10 +1303,72 @@ describe('WebSub', () => {
       ['unsubscribe', CH2],
     ]);
     expect(hook.subscription(CH1)).toMatchObject({ status: 'active', awaitingVerification: true });
-    expect((await hook.handle(verifyRequest('unsubscribe', CH2))).status).toBe(200);
+    expect((await hook.handle(verifyRequest('unsubscribe', CH2))).status).toBe(404); // the hub always echoes our token
+    expect((await hook.handle(hubVerification(fake, 'unsubscribe', CH2))).status).toBe(200);
     expect(hook.subscription(CH2)).toBeNull();
-    await hook.handle(verifyRequest('subscribe', CH1, { 'hub.lease_seconds': '864000' }));
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '864000' }));
     expect(hook.subscription(CH1)).toMatchObject({ status: 'active', leaseSeconds: 864000, awaitingVerification: false });
+  });
+
+  it('refuses token-less verifications and caps the lease, so forged GETs cannot stop renewals', async () => {
+    const fake = fakeYouTube();
+    const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
+    const hook = provider.webhook!;
+    await hook.sync([channel(CH1)]);
+
+    // Within the hour after our request, but without the token Google's hub always echoes: refused.
+    const forged = verifyRequest('subscribe', CH1, { 'hub.lease_seconds': '315360000' });
+    expect((await hook.handle(forged)).status).toBe(404);
+    expect(hook.subscription(CH1)).toMatchObject({ status: 'pending', verifiedAt: null });
+
+    // Even with the right token a lease is never longer than the one we asked for.
+    expect((await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '315360000' }))).status).toBe(200);
+    expect(hook.subscription(CH1)).toMatchObject({ status: 'active', leaseSeconds: 864_000, expiresAt: c.t + 864_000_000 });
+
+    // A repeated verification of the same request (hub retry) can shorten the lease but never extend it.
+    c.advance(MIN);
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '432000' }));
+    const granted = hook.subscription(CH1)!;
+    expect(granted).toMatchObject({ leaseSeconds: 432_000, expiresAt: c.t + 432_000_000 });
+    c.advance(MIN);
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '864000' }));
+    expect(hook.subscription(CH1)).toMatchObject({ leaseSeconds: 432_000, expiresAt: granted.expiresAt });
+
+    // The real lease is renewed in time.
+    fake.reset();
+    c.advance(4 * DAY);
+    await hook.sync([channel(CH1)]);
+    expect(fake.hubCalls().map((call) => new URLSearchParams(call.body!).get('hub.mode'))).toEqual(['subscribe']);
+  });
+
+  it('ignores forged hub.mode=denied GETs unless a subscribe request is waiting for the hub', async () => {
+    const fake = fakeYouTube();
+    const { provider, clock: c } = makeProvider(fake, { env: webhookEnv });
+    const hook = provider.webhook!;
+    const denied = (channelId: string) => ({ ...verifyRequest('denied', channelId), query: { 'hub.mode': 'denied', 'hub.topic': websubTopic(channelId), 'hub.reason': 'nope' } });
+    await hook.sync([channel(CH1)]);
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '432000' }));
+
+    // Active lease, nothing in flight: denials are only logged and do not postpone the renewal.
+    for (let i = 0; i < 5; i++) {
+      c.advance(HOUR);
+      expect((await hook.handle(denied(CH1))).status).toBe(200);
+    }
+    expect(hook.subscription(CH1)).toMatchObject({ status: 'active', failures: 0, retryAt: 0, lastError: null });
+    fake.reset();
+    c.advance(4 * DAY);
+    await hook.sync([channel(CH1)]);
+    expect(fake.hubCalls()).toHaveLength(1);
+
+    // A denial for the renewal still in flight counts, but only once per request.
+    await hook.handle(denied(CH1));
+    await hook.handle(denied(CH1));
+    expect(hook.subscription(CH1)).toMatchObject({ status: 'active', failures: 1, lastError: 'hub denied the subscription: nope' });
+    // The hub's real verification still wins over a (forged) earlier denial.
+    await hook.handle(hubVerification(fake, 'subscribe', CH1, { 'hub.lease_seconds': '432000' }));
+    expect(hook.subscription(CH1)).toMatchObject({ status: 'active', failures: 0, retryAt: 0, expiresAt: c.t + 432_000_000 });
+    await hook.handle(denied(CH1));
+    expect(hook.subscription(CH1)).toMatchObject({ failures: 0, retryAt: 0 });
   });
 
   it('backs off when the hub answers 503 with Retry-After, and retries unverified subscriptions later', async () => {

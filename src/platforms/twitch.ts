@@ -39,6 +39,8 @@ const TOKEN_URL = 'https://id.twitch.tv/oauth2/token';
 const TOKEN_KV_KEY = 'twitch:app_token';
 
 const MAX_IDS_PER_REQUEST = 100;
+/** Get Streams can return a short page plus a cursor that is not the end of the list; follow at most this many pages. */
+const STREAMS_MAX_PAGES = 3;
 const VIDEOS_PAGE_SIZE = 20;
 const CLIP_WINDOW_MS = 12 * 3_600_000;
 const CLIP_MAX_PAGES = 3;
@@ -667,11 +669,8 @@ export class TwitchProvider implements PlatformProvider {
       this.logger.warn({ channels: invalid.map((c) => c.id) }, 'Skipping Twitch channels with a malformed user id (reported offline)');
     }
 
-    const pages = await Promise.all(
-      chunk(ids, MAX_IDS_PER_REQUEST).map((batch) => helix.get<HelixPage<HelixStream>>('/streams', { user_id: batch, first: MAX_IDS_PER_REQUEST })),
-    );
     const streams = new Map<string, HelixStream>();
-    for (const page of pages) for (const stream of page?.data ?? []) streams.set(stream.user_id, stream);
+    await Promise.all(chunk(ids, MAX_IDS_PER_REQUEST).map((batch) => this.fetchStreams(helix, batch, streams)));
 
     const now = this.clock.now();
     for (const id of ids) this.liveStreams.set(id, { streamId: streams.get(id)?.id ?? null, at: now });
@@ -681,6 +680,19 @@ export class TwitchProvider implements PlatformProvider {
       const stream = streams.get(channel.platformId);
       return stream ? this.toSnapshot(channel, stream, art) : offlineSnapshot({ platform: 'twitch', platformId: channel.platformId }, channelUrl(channel.handle));
     });
+  }
+
+  /** Live streams of one batch of user ids; a stream missing from a short first page must not read as offline. */
+  private async fetchStreams(helix: TwitchHelixClient, batch: string[], into: Map<string, HelixStream>): Promise<void> {
+    let cursor: string | undefined;
+    for (let page = 0; page < STREAMS_MAX_PAGES; page++) {
+      const res = await helix.get<HelixPage<HelixStream>>('/streams', { user_id: batch, first: MAX_IDS_PER_REQUEST, after: cursor });
+      const data = res?.data ?? [];
+      for (const stream of data) into.set(stream.user_id, stream);
+      const next = res?.pagination?.cursor || undefined;
+      if (!next || next === cursor || data.length === 0 || batch.every((id) => into.has(id))) return;
+      cursor = next;
+    }
   }
 
   private toSnapshot(channel: ChannelRef, s: HelixStream, art: Map<string, string | null>): LiveSnapshot {

@@ -329,7 +329,7 @@ export function ChannelPicker({ channels, placeholder = 'اختر روم أو ا
         label: channel.name,
         sublabel: channel.parentName ?? undefined,
         icon: channel.type === 'announcement' ? <Megaphone className="size-4 shrink-0 text-zinc-500" /> : <Hash className="size-4 shrink-0 text-zinc-500" />,
-        warning: channel.botCanPost ? undefined : 'البوت ما يقدر يرسل في هذا الروم: اسمح له بـ View Channel و Send Messages و Embed Links.',
+        warning: channel.botCanPost ? undefined : 'البوت ما يقدر يرسل في هذا الروم: اسمح له بـ View Channel و Send Messages و Embed Links (و Attach Files لصور تيك توك).',
       })),
     [channels],
   );

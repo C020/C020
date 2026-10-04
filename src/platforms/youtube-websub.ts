@@ -260,7 +260,10 @@ export interface WebSubCallbacks {
    * check (newly queued or not classified yet), false when it is already known.
    */
   onNewVideo(entry: FeedEntry & { channelId: string }): boolean;
-  /** True when the video is an upcoming/live stream being tracked (pushes about it may mean it went live or ended). */
+  /**
+   * True when the video is an upcoming/live stream being tracked (pushes about it may mean it went live or
+   * ended); the provider then re-checks it on the next live check, whatever its schedule.
+   */
   isTrackedStream(channelId: string, videoId: string): boolean;
   onDeleted?(channelId: string, videoId: string): void;
 }
@@ -387,9 +390,12 @@ export class YouTubeWebSubAdapter implements WebhookAdapter {
     if (!mode || !channelId) return { status: 404, hints: [] };
 
     if (mode === 'denied') {
-      const reason = req.query['hub.reason'] ?? 'no reason given';
+      // Denials carry no token, so anyone can send one: only the first one for a subscribe request that is
+      // still waiting for the hub's answer counts. Others must not postpone renewals of a working lease.
+      const reason = (req.query['hub.reason'] ?? 'no reason given').slice(0, 200);
       const sub = this.load(channelId);
-      if (sub && sub.status !== 'unsubscribing') this.markFailed(sub, `hub denied the subscription: ${reason}`);
+      if (sub && this.hasOpenRequest(sub, this.o.now())) this.markFailed(sub, `hub denied the subscription: ${reason}`);
+      else this.o.logger.info({ channelId, reason }, 'Ignoring a WebSub denial that matches no open subscribe request');
       return { status: 200, body: '', contentType: 'text/plain; charset=utf-8', hints: [] };
     }
     if (!challenge || challenge.length > MAX_CHALLENGE_LENGTH) return { status: 400, hints: [] };
@@ -403,7 +409,14 @@ export class YouTubeWebSubAdapter implements WebhookAdapter {
         this.o.logger.warn({ channelId }, 'Refusing a WebSub subscribe verification we did not request');
         return { status: 404, hints: [] };
       }
-      const leaseSeconds = this.parseLease(req.query['hub.lease_seconds']);
+      let leaseSeconds = this.parseLease(req.query['hub.lease_seconds']);
+      let expiresAt = now + leaseSeconds * 1000;
+      if (prev && (prev.verifiedAt ?? -1) >= prev.requestedAt && prev.expiresAt !== null && prev.leaseSeconds !== null) {
+        // A repeated verification of an already verified request (a hub retry) may shorten the lease, never
+        // extend it: the renewal must not be postponed past the lease the hub really granted.
+        leaseSeconds = Math.min(leaseSeconds, prev.leaseSeconds);
+        expiresAt = Math.min(expiresAt, prev.expiresAt);
+      }
       this.save({
         channelId,
         status: 'active',
@@ -412,7 +425,7 @@ export class YouTubeWebSubAdapter implements WebhookAdapter {
         awaitingVerification: false,
         verifiedAt: now,
         leaseSeconds,
-        expiresAt: now + leaseSeconds * 1000,
+        expiresAt,
         failures: 0,
         retryAt: 0,
         lastError: null,
@@ -440,15 +453,29 @@ export class YouTubeWebSubAdapter implements WebhookAdapter {
 
   private isOwnRequest(sub: WebSubSubscription | null, mode: HubMode, token: string | undefined, now: number): boolean {
     if (!sub || sub.fingerprint !== this.fingerprint || now - sub.requestedAt > VERIFY_ACCEPT_WINDOW_MS) return false;
-    if (token === undefined) return true; // hubs that do not echo verify tokens fall back to the time window
+    // We always send hub.verify_token and Google's hub echoes it: without it the GET is not the hub's answer.
+    if (token === undefined) return false;
     const expected = Buffer.from(this.verifyToken(mode, sub.channelId));
     const given = Buffer.from(token);
     return given.length === expected.length && timingSafeEqual(given, expected);
   }
 
+  /** A recent subscribe request of ours that the hub has neither verified nor refused yet. */
+  private hasOpenRequest(sub: WebSubSubscription, now: number): boolean {
+    return (
+      sub.status !== 'unsubscribing' &&
+      sub.fingerprint === this.fingerprint &&
+      now - sub.requestedAt <= VERIFY_ACCEPT_WINDOW_MS &&
+      (sub.verifiedAt ?? -1) < sub.requestedAt &&
+      // markFailed() (a refusal) pushes retryAt past the request; request() resets it to 0.
+      sub.retryAt <= sub.requestedAt
+    );
+  }
+
+  /** Granted lease in seconds, never more than we asked for (a longer one would postpone renewals). */
   private parseLease(value: string | undefined): number {
     const lease = Number(value);
-    return Number.isFinite(lease) && lease > 0 ? Math.floor(lease) : FALLBACK_LEASE_SECONDS;
+    return Number.isFinite(lease) && lease >= 1 ? Math.min(Math.floor(lease), REQUESTED_LEASE_SECONDS) : FALLBACK_LEASE_SECONDS;
   }
 
   // ─────────────── notifications (POST) ───────────────
