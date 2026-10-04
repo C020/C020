@@ -17,7 +17,7 @@ import type {
 } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
 import { type ChannelFact, diagnoseGuild, type GuildFacts, type RoleFact } from './diagnostics.js';
-import { isAssignable, missingPostingPermissions, type RolePosition } from './permissions.js';
+import { isAssignable, isElevatedPermissions, missingPostingPermissions, type RolePosition } from './permissions.js';
 import { isSnowflake } from './util.js';
 
 const log = childLogger('discord.gateway');
@@ -111,6 +111,8 @@ export class DiscordLookups implements DiscordGateway {
         position: role.position,
         managed: role.managed,
         assignable: isAssignable({ guildId: guild.id, role: { id: role.id, name: role.name, position: role.position, managed: role.managed }, bot }),
+        permissions: role.permissions.bitfield.toString(),
+        elevated: isElevatedPermissions(role.permissions.bitfield),
       }));
   }
 
@@ -196,6 +198,7 @@ export class DiscordLookups implements DiscordGateway {
         name: channel.name,
         textBased,
         missing: textBased && perms ? missingPostingPermissions((flag) => perms.has(flag), channel.isThread()) : [],
+        canAttachFiles: textBased && perms ? perms.has(PermissionFlagsBits.AttachFiles) : undefined,
       });
     }
 

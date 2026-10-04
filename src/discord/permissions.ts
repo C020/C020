@@ -10,6 +10,8 @@ export const REQUIRED_PERMISSIONS: bigint =
   PermissionFlagsBits.ViewChannel |
   PermissionFlagsBits.SendMessages |
   PermissionFlagsBits.EmbedLinks |
+  // Expiring TikTok images are uploaded as attachments (content posts and summaries).
+  PermissionFlagsBits.AttachFiles |
   PermissionFlagsBits.ReadMessageHistory;
 
 export function buildInviteUrl(clientId: string, permissions: bigint = REQUIRED_PERMISSIONS): string {
@@ -21,6 +23,7 @@ export const PERMISSION_NAMES_AR = {
   SendMessages: 'إرسال الرسائل (Send Messages)',
   SendMessagesInThreads: 'الإرسال في الثريدات (Send Messages in Threads)',
   EmbedLinks: 'تضمين الروابط (Embed Links)',
+  AttachFiles: 'إرفاق الملفات (Attach Files)',
   ReadMessageHistory: 'قراءة سجل الرسائل (Read Message History)',
   ManageRoles: 'إدارة الرتب (Manage Roles)',
   MentionEveryone: 'منشن الجميع (Mention @everyone)',
@@ -40,6 +43,26 @@ export function missingPostingPermissions(has: (flag: bigint) => boolean, isThre
 
 export function permissionListAr(names: PermissionName[]): string {
   return names.map((n) => PERMISSION_NAMES_AR[n]).join('، ');
+}
+
+/**
+ * Permissions that make a role "elevated" (moderation/admin power). The bot hands its roles out automatically,
+ * so such a role must never be used as the Streamer / Streaming Now role.
+ */
+export const ELEVATED_PERMISSIONS: bigint =
+  PermissionFlagsBits.Administrator |
+  PermissionFlagsBits.ManageGuild |
+  PermissionFlagsBits.ManageRoles |
+  PermissionFlagsBits.ManageChannels |
+  PermissionFlagsBits.ManageMessages |
+  PermissionFlagsBits.ManageWebhooks |
+  PermissionFlagsBits.BanMembers |
+  PermissionFlagsBits.KickMembers |
+  PermissionFlagsBits.ModerateMembers |
+  PermissionFlagsBits.MentionEveryone;
+
+export function isElevatedPermissions(bitfield: bigint): boolean {
+  return (bitfield & ELEVATED_PERMISSIONS) !== 0n;
 }
 
 // ───────────────────────────── role hierarchy ─────────────────────────────

@@ -13,12 +13,15 @@ import type {
   ContentView,
   DiscordGateway,
   DiscordMemberInfo,
+  EditOutcome,
   GuildDiagnostics,
   LiveView,
   MessageRef,
   MonitorControl,
   Notifier,
+  RoleChangeOutcome,
   RoleManager,
+  SummaryOutcome,
   SummaryView,
 } from '../../src/services/ports.js';
 
@@ -42,7 +45,10 @@ export class FakeNotifier implements Notifier {
   readonly updates: Array<{ ref: MessageRef; view: LiveView }> = [];
   /** Every live render (post or edit) in order. */
   readonly renders: Array<{ kind: 'post' | 'update'; ref: MessageRef; view: LiveView }> = [];
-  readonly summaries: Array<{ ref: MessageRef | null; view: SummaryView; result: MessageRef | null }> = [];
+  /** Every summary attempt; `result` is the final ref (null when skipped or failed). */
+  readonly summaries: Array<{ ref: MessageRef | null; view: SummaryView; result: MessageRef | null; outcome: SummaryOutcome }> = [];
+  /** Live edit attempts that did not succeed (transient/forbidden/gone). */
+  readonly failedUpdates: Array<{ ref: MessageRef; outcome: EditOutcome }> = [];
   readonly contents: Array<{ view: ContentView; ref: MessageRef | null }> = [];
   readonly logs: Array<{ guildId: string; message: string }> = [];
   /** Message ids that were deleted in Discord. */
@@ -51,10 +57,16 @@ export class FakeNotifier implements Notifier {
   failContent = 0;
   throwOnContent = false;
   throwOnUpdate = false;
+  /** Outcome of upcoming live edits (consumed one per edit; empty = normal behavior). */
+  readonly updateOutcomes: EditOutcome[] = [];
+  /** Upcoming postSummary calls that fail transiently. */
+  failSummaries = 0;
+  /** While true, postLive fails (returns null), e.g. the bot lost access to the channel. */
+  failPosts = false;
   private seq = 0;
 
   async postLive(view: LiveView): Promise<MessageRef | null> {
-    if (!view.settings.liveChannelId) return null;
+    if (!view.settings.liveChannelId || this.failPosts) return null;
     const ref = { channelId: view.settings.liveChannelId, messageId: `live-${++this.seq}` };
     const entry = { ref, view: clone(view) };
     this.posts.push(entry);
@@ -62,21 +74,34 @@ export class FakeNotifier implements Notifier {
     return ref;
   }
 
-  async updateLive(ref: MessageRef, view: LiveView): Promise<boolean> {
+  async updateLive(ref: MessageRef, view: LiveView): Promise<EditOutcome> {
     if (this.throwOnUpdate) throw new Error('discord down');
-    if (this.deleted.has(ref.messageId)) return false;
+    const scripted = this.updateOutcomes.shift();
+    const outcome: EditOutcome = scripted ?? (this.deleted.has(ref.messageId) ? 'gone' : 'ok');
+    if (outcome !== 'ok') {
+      this.failedUpdates.push({ ref, outcome });
+      return outcome;
+    }
     const entry = { ref, view: clone(view) };
     this.updates.push(entry);
     this.renders.push({ kind: 'update', ...entry });
-    return true;
+    return 'ok';
   }
 
-  async postSummary(ref: MessageRef | null, view: SummaryView): Promise<MessageRef | null> {
-    let result: MessageRef | null = null;
-    if (ref && !this.deleted.has(ref.messageId)) result = ref;
-    else if (view.settings.liveChannelId && view.settings.options.summaryEnabled) result = { channelId: view.settings.liveChannelId, messageId: `sum-${++this.seq}` };
-    this.summaries.push({ ref, view: clone(view), result });
-    return result;
+  async postSummary(ref: MessageRef | null, view: SummaryView): Promise<SummaryOutcome> {
+    let outcome: SummaryOutcome;
+    if (this.failSummaries > 0) {
+      this.failSummaries--;
+      outcome = { status: 'transient', reason: 'error' };
+    } else if (ref && !this.deleted.has(ref.messageId)) {
+      outcome = { status: 'done', ref };
+    } else if (view.settings.liveChannelId && view.settings.options.summaryEnabled) {
+      outcome = { status: 'done', ref: { channelId: view.settings.liveChannelId, messageId: `sum-${++this.seq}` } };
+    } else {
+      outcome = { status: 'skipped' };
+    }
+    this.summaries.push({ ref, view: clone(view), result: outcome.status === 'done' ? outcome.ref : null, outcome });
+    return outcome;
   }
 
   async postContent(view: ContentView): Promise<MessageRef | null> {
@@ -112,20 +137,53 @@ export class FakeRoles implements RoleManager {
   readonly liveCalls: Array<{ guildId: string; userId: string; live: boolean }> = [];
   readonly streamerCalls: Array<{ guildId: string; userId: string; isStreamer: boolean }> = [];
   readonly reconcileCalls: Array<{ guildId: string; live: string[]; streamers: string[] }> = [];
+  readonly removeCalls: Array<{ guildId: string; roleId: string; userIds: string[]; reason: string }> = [];
+  /** Upcoming setLive calls that fail transiently (role unchanged). */
+  failLive = 0;
+  /** Upcoming reconcile calls that throw (e.g. Discord not ready). */
+  failReconcile = 0;
 
-  async setLive(guildId: string, userId: string, live: boolean): Promise<void> {
+  async setLive(guildId: string, userId: string, live: boolean): Promise<RoleChangeOutcome> {
     this.liveCalls.push({ guildId, userId, live });
+    if (this.failLive > 0) {
+      this.failLive--;
+      return 'transient';
+    }
+    const changed = this.isLive(guildId, userId) !== live;
     this.live.set(`${guildId}:${userId}`, live);
+    return changed ? 'applied' : 'noop';
   }
 
-  async setStreamer(guildId: string, userId: string, isStreamer: boolean): Promise<void> {
+  async setStreamer(guildId: string, userId: string, isStreamer: boolean): Promise<RoleChangeOutcome> {
     this.streamerCalls.push({ guildId, userId, isStreamer });
+    const changed = this.streamer.get(`${guildId}:${userId}`) !== isStreamer;
     this.streamer.set(`${guildId}:${userId}`, isStreamer);
+    return changed ? 'applied' : 'noop';
   }
 
+  async removeRoleFrom(guildId: string, roleId: string, userIds: string[], reason: string): Promise<void> {
+    this.removeCalls.push({ guildId, roleId, userIds: [...userIds], reason });
+  }
+
+  /** Applies the live role like the real reconcile: added for live users, removed only from registered streamers. */
   async reconcile(guildId: string, liveUserIds: Set<string>, streamerUserIds: Set<string>): Promise<{ added: number; removed: number }> {
     this.reconcileCalls.push({ guildId, live: [...liveUserIds].sort(), streamers: [...streamerUserIds].sort() });
-    return { added: liveUserIds.size, removed: 0 };
+    if (this.failReconcile > 0) {
+      this.failReconcile--;
+      throw new Error('البوت غير متصل بديسكورد حالياً، جرّب بعد شوي');
+    }
+    let added = 0;
+    let removed = 0;
+    for (const userId of liveUserIds) {
+      if (!this.isLive(guildId, userId)) added++;
+      this.live.set(`${guildId}:${userId}`, true);
+    }
+    for (const userId of streamerUserIds) {
+      if (liveUserIds.has(userId) || !this.isLive(guildId, userId)) continue;
+      this.live.set(`${guildId}:${userId}`, false);
+      removed++;
+    }
+    return { added, removed };
   }
 
   isLive(guildId: string, userId: string): boolean {

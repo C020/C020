@@ -38,9 +38,12 @@ import type {
   DiscordGuildInfo,
   DiscordMemberInfo,
   DiscordRoleInfo,
+  EditOutcome,
   GuildDiagnostics,
   LiveView,
   MessageRef,
+  RoleChangeOutcome,
+  SummaryOutcome,
   SummaryView,
 } from '../services/ports.js';
 import type { MessagePreview } from '../shared/api.js';
@@ -75,6 +78,8 @@ export interface DiscordServiceOptions {
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const SHUTDOWN_FLUSH_MS = 3_000;
 const MEMBER_WARMUP_RETRY_MS = 10 * 60_000;
+/** Shard resume/ready events arriving close together trigger one recovery pass. */
+const GATEWAY_RECOVERY_DEBOUNCE_MS = 5_000;
 
 /** Turns gateway login failures into actionable operator messages (logs are English). */
 /** Startup failure; `permanent` errors (bad token, missing intent) won't fix themselves by retrying. */
@@ -124,6 +129,10 @@ export class DiscordService implements DiscordApi {
   private readonly memberWarmups = new Map<string, number>();
   private readonly startedAt = Date.now();
   private readonly throttle = new WarnThrottle();
+  private readonly recoveryListeners: Array<() => void> = [];
+  private recoveryTimer: NodeJS.Timeout | null = null;
+  /** Set once the first READY of the current client arrived (later shard READY events are reconnects). */
+  private initialReady = false;
 
   private readonly notifier: DiscordNotifier;
   private readonly roleManager: DiscordRoles;
@@ -169,6 +178,8 @@ export class DiscordService implements DiscordApi {
   }
 
   async stop(): Promise<void> {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     await withTimeout(this.notifier.close(), SHUTDOWN_FLUSH_MS, 'log flush timed out').catch(() => {});
     const client = this.client;
     this.client = null;
@@ -192,10 +203,41 @@ export class DiscordService implements DiscordApi {
     };
   }
 
+  /**
+   * Registers a callback for when the gateway comes back after a disconnect (shard resumed or re-identified).
+   * Role changes may have failed while it was away, so the wiring reconciles live roles from here.
+   */
+  onGatewayRecovered(listener: () => void): void {
+    this.recoveryListeners.push(listener);
+  }
+
+  private gatewayRecovered(shardId: number, how: 'resume' | 'ready'): void {
+    if (!this.initialReady) return;
+    log.info({ shardId, how }, 'Discord gateway recovered');
+    if (this.recoveryTimer) return;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      for (const listener of this.recoveryListeners) {
+        try {
+          listener();
+        } catch (err) {
+          log.warn({ err }, 'Gateway recovery listener failed');
+        }
+      }
+    }, GATEWAY_RECOVERY_DEBOUNCE_MS);
+    this.recoveryTimer.unref();
+  }
+
   private async connect(): Promise<void> {
     const client = this.createClient();
     this.client = client;
-    const ready = new Promise<void>((resolve) => client.once(Events.ClientReady, () => resolve()));
+    this.initialReady = false;
+    const ready = new Promise<void>((resolve) =>
+      client.once(Events.ClientReady, () => {
+        this.initialReady = true;
+        resolve();
+      }),
+    );
     try {
       await withTimeout(Promise.all([client.login(this.config.DISCORD_TOKEN), ready]), this.readyTimeoutMs, 'Discord READY timeout');
     } catch (err) {
@@ -243,7 +285,11 @@ export class DiscordService implements DiscordApi {
     client.on(Events.Warn, (message) => log.warn(message));
     client.on(Events.ShardDisconnect, (event, shardId) => log.warn({ shardId, code: event.code }, 'Discord gateway disconnected'));
     client.on(Events.ShardReconnecting, (shardId) => log.info({ shardId }, 'Discord gateway reconnecting'));
-    client.on(Events.ShardResume, (shardId, replayed) => log.info({ shardId, replayed }, 'Discord gateway resumed'));
+    client.on(Events.ShardResume, (shardId, replayed) => {
+      log.info({ shardId, replayed }, 'Discord gateway resumed');
+      this.gatewayRecovered(shardId, 'resume');
+    });
+    client.on(Events.ShardReady, (shardId) => this.gatewayRecovered(shardId, 'ready'));
     client.on(Events.ShardError, (err, shardId) => log.warn({ err, shardId }, 'Discord gateway error'));
     client.rest.on('invalidRequestWarning', (info) =>
       log.warn({ count: info.count, remainingMs: info.remainingTime }, 'Many invalid Discord requests (403/401/429); check permissions to avoid a temporary ban'),
@@ -419,11 +465,11 @@ export class DiscordService implements DiscordApi {
     return this.notifier.postLive(view);
   }
 
-  updateLive(ref: MessageRef, view: LiveView): Promise<boolean> {
+  updateLive(ref: MessageRef, view: LiveView): Promise<EditOutcome> {
     return this.notifier.updateLive(ref, view);
   }
 
-  postSummary(ref: MessageRef | null, view: SummaryView): Promise<MessageRef | null> {
+  postSummary(ref: MessageRef | null, view: SummaryView): Promise<SummaryOutcome> {
     return this.notifier.postSummary(ref, view);
   }
 
@@ -437,12 +483,16 @@ export class DiscordService implements DiscordApi {
 
   // ───────────────────────────── RoleManager ─────────────────────────────
 
-  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<void> {
+  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<RoleChangeOutcome> {
     return this.roleManager.setLive(guildId, userId, live, reason);
   }
 
-  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<void> {
+  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<RoleChangeOutcome> {
     return this.roleManager.setStreamer(guildId, userId, isStreamer, reason);
+  }
+
+  removeRoleFrom(guildId: string, roleId: string, userIds: string[], reason: string): Promise<void> {
+    return this.roleManager.removeRoleFrom(guildId, roleId, userIds, reason);
   }
 
   reconcile(guildId: string, liveUserIds: Set<string>, streamerUserIds: Set<string>): Promise<{ added: number; removed: number }> {

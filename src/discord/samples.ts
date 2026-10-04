@@ -120,6 +120,8 @@ function sampleSession(settings: GuildSettings, startedAt: number, endedAt: numb
     ],
     titles: ['سوالف الصباح ☕', SAMPLE_TITLE],
     lastMessageUpdate: null,
+    summaryPending: false,
+    summaryAttempts: 0,
     createdAt: iso(startedAt),
     updatedAt: iso(endedAt ?? startedAt),
   };

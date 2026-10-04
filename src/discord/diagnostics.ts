@@ -4,7 +4,7 @@
  */
 import type { GuildSettings } from '../db/models.js';
 import type { GuildDiagnostics } from '../services/ports.js';
-import { decideRoleAssignability, type PermissionName, permissionListAr, type RolePosition } from './permissions.js';
+import { decideRoleAssignability, PERMISSION_NAMES_AR, type PermissionName, permissionListAr, type RolePosition } from './permissions.js';
 
 export interface RoleFact extends RolePosition {
   name: string;
@@ -19,6 +19,8 @@ export interface ChannelFact {
   textBased: boolean;
   /** Posting permissions the bot lacks there. */
   missing: PermissionName[];
+  /** Whether the bot may upload files there (expiring TikTok images are uploaded); undefined when unknown. */
+  canAttachFiles?: boolean;
 }
 
 export interface GuildFacts {
@@ -63,7 +65,7 @@ function checkRole(facts: GuildFacts, kind: keyof typeof ROLE_LABELS, roleId: st
   }
 }
 
-function checkChannel(facts: GuildFacts, kind: keyof typeof CHANNEL_LABELS, channelId: string | null, out: Problem[]): void {
+function checkChannel(facts: GuildFacts, kind: keyof typeof CHANNEL_LABELS, channelId: string | null, out: Problem[], needsUploads = false): void {
   const label = CHANNEL_LABELS[kind];
   if (!channelId) {
     if (kind === 'live') out.push({ code: 'live_channel_unset', level: 'warn', message: `ما حددت روم ${label} — البوت ما راح يرسل إشعارات البث` });
@@ -85,6 +87,15 @@ function checkChannel(facts: GuildFacts, kind: keyof typeof CHANNEL_LABELS, chan
       code: `${kind}_channel_no_permission`,
       level,
       message: `البوت ما يقدر يرسل في روم ${label} (#${channel.name}) — ناقصه: ${permissionListAr(channel.missing)}`,
+    });
+    return;
+  }
+  // Not fatal: without it the image is sent as a link, which expires for TikTok.
+  if (needsUploads && channel.canAttachFiles === false) {
+    out.push({
+      code: `${kind}_channel_no_attach_files`,
+      level: 'warn',
+      message: `البوت ما عنده صلاحية ${PERMISSION_NAMES_AR.AttachFiles} في روم ${label} (#${channel.name}) — صور تيك توك بتنرسل كروابط وتختفي بعد فترة`,
     });
   }
 }
@@ -150,8 +161,10 @@ export function diagnoseGuild(facts: GuildFacts, settings: GuildSettings): Guild
     });
   }
 
-  checkChannel(facts, 'live', settings.liveChannelId, problems);
-  checkChannel(facts, 'content', settings.contentChannelId, problems);
+  // TikTok images expire, so they are uploaded with content posts and summaries.
+  const uploadsImages = settings.platformsEnabled.includes('tiktok');
+  checkChannel(facts, 'live', settings.liveChannelId, problems, uploadsImages);
+  checkChannel(facts, 'content', settings.contentChannelId, problems, uploadsImages);
   checkChannel(facts, 'log', settings.logChannelId, problems);
   checkPing(facts, settings, problems);
 

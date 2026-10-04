@@ -213,6 +213,25 @@ describe('StreamerService', () => {
       expect(env.repos.audit.list({ guildId: GUILD, actionPrefix: 'streamer.delete' })).toHaveLength(1);
     });
 
+    it('delete warns in the audit log when the live role could not be removed (Discord hiccup)', async () => {
+      const st = await svc.create(GUILD, request(), 'u');
+      // Reconciles only take the live role from registered streamers, so after the delete nobody retries it.
+      vi.spyOn(env.roles, 'setLive').mockImplementation((async () => 'transient') as never);
+
+      await svc.delete(GUILD, st.id, 'user:9');
+      const warn = env.repos.audit.list({ guildId: GUILD }).filter((e) => e.action === 'discord.roles' && e.level === 'warn');
+      expect(warn).toHaveLength(1);
+      expect(warn[0]!.message).toContain('رتبة البث المباشر');
+      expect(warn[0]!.actor).toBe('user:9');
+    });
+
+    it('delete does not warn when the live role change went through or was not needed', async () => {
+      const st = await svc.create(GUILD, request(), 'u');
+      vi.spyOn(env.roles, 'setLive').mockImplementation((async () => 'noop') as never);
+      await svc.delete(GUILD, st.id, 'u');
+      expect(env.repos.audit.list({ guildId: GUILD }).filter((e) => e.action === 'discord.roles')).toHaveLength(0);
+    });
+
     it('keeps the streamer role on delete when removeStreamerRoleOnDelete is off, and keeps shared channels', async () => {
       env.repos.settings.update(GUILD, { options: { removeStreamerRoleOnDelete: false } });
       const st = await svc.create(GUILD, request(), 'u');

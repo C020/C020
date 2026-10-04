@@ -9,6 +9,7 @@ import {
   buildSummaryMessage,
   ENDED_COLOR,
   fitEmbed,
+  kickVideosUrl,
   linkButtonRows,
   toPreview,
 } from '../../src/discord/messages.js';
@@ -167,9 +168,31 @@ describe('buildSummaryMessage', () => {
 
     expect(buttonsOf(msg).map((b) => [b.label, b.url])).toEqual([
       ['الإعادة على Twitch', 'https://www.twitch.tv/videos/123'],
+      ['إعادات Kick', 'https://kick.com/abufahad/videos'],
       ['قناة Twitch', 'https://www.twitch.tv/abufahad'],
       ['قناة Kick', 'https://kick.com/abufahad'],
     ]);
+  });
+
+  it("links Kick's videos page while a Kick recording is not known yet (never instead of a real VOD)", () => {
+    const base = summaryView();
+    const kickOnly = base.segments.filter((seg) => seg.platform === 'kick');
+    const labels = (view: typeof base) => buttonsOf(buildSummaryMessage(view)).map((b) => [b.label, b.url]);
+
+    expect(labels({ ...base, segments: kickOnly })).toEqual([
+      ['إعادات Kick', 'https://kick.com/abufahad/videos'],
+      ['قناة Kick', 'https://kick.com/abufahad'],
+    ]);
+    const withVod = kickOnly.map((seg) => ({ ...seg, vodUrl: 'https://kick.com/abufahad/videos/abc-123' }));
+    expect(labels({ ...base, segments: withVod })).toEqual([
+      ['الإعادة على Kick', 'https://kick.com/abufahad/videos/abc-123'],
+      ['قناة Kick', 'https://kick.com/abufahad'],
+    ]);
+    // Falls back to the handle when the channel URL is not a kick.com page.
+    expect(kickVideosUrl({ url: 'not a url', handle: 'abu_fahad' })).toBe('https://kick.com/abu_fahad/videos');
+    expect(kickVideosUrl({ url: '', handle: 'bad handle!' })).toBeNull();
+    // The minimal "ended" card stays minimal.
+    expect(buttonsOf(buildEndedMessage({ ...base, segments: kickOnly })).map((b) => b.label)).toEqual(['قناة Kick']);
   });
 
   it('handles missing stats gracefully', () => {

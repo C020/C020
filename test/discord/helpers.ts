@@ -52,6 +52,8 @@ export function session(patch: Partial<LiveSession> = {}): LiveSession {
     categories: [],
     titles: [],
     lastMessageUpdate: null,
+    summaryPending: false,
+    summaryAttempts: 0,
     createdAt: new Date(T0 - 30 * MIN).toISOString(),
     updatedAt: new Date(T0).toISOString(),
     ...patch,

@@ -289,6 +289,7 @@ interface SummaryChannel {
   platform: Platform;
   channelId: number;
   displayName: string;
+  handle: string;
   url: string;
   peak: number;
   vodUrl: string | null;
@@ -308,6 +309,7 @@ function summaryChannels(view: SummaryView): SummaryChannel[] {
       platform: seg.platform,
       channelId: seg.channelId,
       displayName: cleanText(seg.channel.displayName) || cleanText(seg.channel.handle),
+      handle: seg.channel.handle,
       url: seg.channel.url,
       peak: seg.peakViewers,
       vodUrl: safeUrl(seg.vodUrl),
@@ -355,16 +357,34 @@ function platformsValue(channels: SummaryChannel[], emojis: PlatformEmojis): str
     .join('\n');
 }
 
+/**
+ * Kick's videos page for a channel (`https://kick.com/<slug>/videos`). Kick often lists a recording only some
+ * time after the stream, so without a known VOD the summary still links to where it will appear.
+ */
+export function kickVideosUrl(channel: { url: string; handle: string }): string | null {
+  const page = safeUrl(channel.url);
+  if (page) {
+    const url = new URL(page);
+    const slug = url.pathname.split('/').filter(Boolean)[0];
+    if (/(^|\.)kick\.com$/i.test(url.hostname) && slug) return `https://kick.com/${slug}/videos`;
+  }
+  const handle = channel.handle.trim().replace(/^@/, '');
+  return /^[\w-]{1,64}$/.test(handle) ? `https://kick.com/${handle}/videos` : null;
+}
+
 function summaryButtons(channels: SummaryChannel[], emojis: PlatformEmojis): LinkButtonRow[] {
   const vods: LinkButtonSpec[] = channels
     .filter((c) => c.vodUrl)
     .map((c) => ({ label: `الإعادة على ${PLATFORM_LABELS[c.platform]}`, url: c.vodUrl, emoji: { name: ICONS.vod } }));
+  const kickVideos: LinkButtonSpec[] = channels
+    .filter((c) => c.platform === 'kick' && !c.vodUrl)
+    .map((c) => ({ label: `إعادات ${PLATFORM_LABELS.kick}`, url: kickVideosUrl(c), emoji: { name: ICONS.vod } }));
   const links: LinkButtonSpec[] = channels.map((c) => ({
     label: `قناة ${PLATFORM_LABELS[c.platform]}`,
     url: c.url,
     emoji: emojiFor(emojis, c.platform).component,
   }));
-  return linkButtonRows([...vods, ...links]);
+  return linkButtonRows([...vods, ...kickVideos, ...links]);
 }
 
 function summaryAvatar(view: SummaryView, options: RenderOptions): string | null {

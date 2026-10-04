@@ -16,6 +16,10 @@
  * - Message edits are throttled: significant changes (platform joined/left, title, category) are applied at
  *   most once per `minEditIntervalMs`; viewer-only refreshes follow `options.liveUpdateMinutes`.
  * - Every handler is failure-isolated per subscriber and never throws to the monitor.
+ * - Discord failures heal: a summary that could not be published stays `summaryPending` in the DB and is
+ *   retried with backoff (and after a restart); a live edit that failed transiently or lost access is retried
+ *   without reposting; a live-role change that failed transiently schedules a role reconcile for the guild, and
+ *   guilds with active or recently ended sessions are reconciled periodically and after gateway reconnects.
  */
 import type { ProviderRegistryApi, SessionServiceApi } from '../app/context.js';
 import { errorMessage } from '../core/errors.js';
@@ -26,7 +30,7 @@ import { offlineSnapshot, PLATFORM_LABELS } from '../core/types.js';
 import type { Channel, ChannelSubscriber, GuildSettings, LiveSegment, LiveSession, Streamer, StreamerAccount } from '../db/models.js';
 import type { Repositories } from '../db/repositories.js';
 import type { AuditService } from './audit.js';
-import type { LivePlatformView, LiveView, MessageRef, Notifier, RoleManager, SummaryView } from './ports.js';
+import type { EditOutcome, LivePlatformView, LiveView, MessageRef, Notifier, RoleChangeOutcome, RoleManager, SummaryOutcome, SummaryView } from './ports.js';
 import {
   buildSummaryView,
   categoryKey,
@@ -64,6 +68,14 @@ export interface SessionServiceTiming {
    * Longer than the monitor's own STALE_LIVE_MINUTES so the monitor normally decides first.
    */
   orphanSegmentMs: number;
+  /** Backoff between retries of a summary that failed transiently, by failure count (the last delay repeats). */
+  summaryRetryDelaysMs: number[];
+  /** Failed summary attempts after which the bot gives up (with an audit warning); ~24h with the defaults. */
+  summaryMaxAttempts: number;
+  /** Periodic live-role reconcile of guilds with active or recently ended sessions. */
+  roleReconcileMs: number;
+  /** Backoff of the guild role reconcile scheduled after a transient role change failure (the last delay repeats). */
+  roleRetryDelaysMs: number[];
 }
 
 export const DEFAULT_SESSION_TIMING: SessionServiceTiming = {
@@ -73,6 +85,10 @@ export const DEFAULT_SESSION_TIMING: SessionServiceTiming = {
   vodRetryDelaysMs: [4 * 60_000, 15 * 60_000],
   maxSampleGapMs: 10 * 60_000,
   orphanSegmentMs: 45 * 60_000,
+  summaryRetryDelaysMs: [1, 5, 15, 30, 60].map((m) => m * 60_000),
+  summaryMaxAttempts: 28,
+  roleReconcileMs: 10 * 60_000,
+  roleRetryDelaysMs: [1, 2, 5, 10].map((m) => m * 60_000),
 };
 
 export interface SessionServiceDeps {
@@ -93,6 +109,12 @@ const MAX_STREAM_AGE_MS = 48 * 3_600_000;
 const SAME_BROADCAST_RESUME_MS = 6 * 3_600_000;
 const MAX_TITLES = 20;
 const MAX_CATEGORIES = 30;
+/** Pending summaries looked at per tick (oldest first). */
+const SUMMARY_SCAN_LIMIT = 200;
+/** A guild stays in the periodic role reconcile this long after one of its sessions ended. */
+const RECENT_ROLE_GUILD_MS = 30 * 60_000;
+/** A guild whose role reconcile keeps failing (bot offline / not in the guild) is given up after this long. */
+const ROLE_REPAIR_MAX_AGE_MS = 24 * 3_600_000;
 
 /** Serializes async work per key (FIFO). Different keys run concurrently. */
 export class KeyedMutex<K> {
@@ -166,8 +188,18 @@ export class SessionService implements SessionServiceApi {
   /** When the monitor last reported each channel live (onChannelLive/onChannelUpdate). */
   private readonly lastLiveEventAt = new Map<number, number>();
   private readonly vodRetries = new Map<number, NodeJS.Timeout>();
+  /** When the next attempt of each pending summary is due (ms); unknown (e.g. after a restart) = due now. */
+  private readonly summaryRetryAt = new Map<number, number>();
+  /** Last live thumbnail of ended sessions whose summary is still pending (their runtime is gone). */
+  private readonly summaryThumbnails = new Map<number, string | null>();
+  /** Guilds whose roles must be reconciled after a failure, with backoff state. */
+  private readonly roleRepairs = new Map<string, { dueAt: number; attempt: number; since: number }>();
+  /** Guilds where a session ended recently (ms): part of the periodic role reconcile. */
+  private readonly recentRoleGuilds = new Map<string, number>();
+  private lastRoleSweepAt: number;
+  /** Maintenance passes currently running (each kind runs once at a time). */
+  private readonly busy = new Set<string>();
   private tickTimer: NodeJS.Timeout | null = null;
-  private ticking = false;
   private running = false;
   /** When start() was called; the orphan-segment safety net only applies after a full window. */
   private startedAtMs: number | null = null;
@@ -181,6 +213,7 @@ export class SessionService implements SessionServiceApi {
     this.providers = deps.providers;
     this.clock = deps.clock ?? Date.now;
     this.timing = { ...DEFAULT_SESSION_TIMING, ...deps.timing };
+    this.lastRoleSweepAt = this.clock();
   }
 
   // ───────────────────────────── lifecycle ─────────────────────────────
@@ -189,6 +222,7 @@ export class SessionService implements SessionServiceApi {
     if (this.running) return;
     this.running = true;
     this.startedAtMs = this.clock();
+    this.lastRoleSweepAt = this.startedAtMs;
     this.tickTimer = setInterval(() => void this.tick(), this.timing.tickMs);
     this.tickTimer.unref();
   }
@@ -206,27 +240,36 @@ export class SessionService implements SessionServiceApi {
   }
 
   /**
-   * One maintenance pass over every active session: account viewer/category time, close segments that
-   * lost their account/permission, end sessions without live platforms, flush throttled message edits.
-   * Called by the interval timer; public so tests and admin tooling can drive it.
+   * One maintenance pass: over every active session (account viewer/category time, close segments that lost
+   * their account/permission, end sessions without live platforms, flush throttled message edits), plus
+   * retries of pending summaries and live-role repairs. Each part runs independently (a slow role reconcile
+   * never delays live sessions). Called by the interval timer; public so tests and admin tooling can drive it.
    */
   async tick(): Promise<void> {
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
-      const active = this.repos.sessions.listActive();
-      await Promise.all(
-        active.map((s) =>
-          this.lock
-            .run(s.streamerId, () => this.tickSession(s.id))
-            .catch((err) => log.error({ err, sessionId: s.id }, 'Session tick failed')),
-        ),
-      );
-    } catch (err) {
-      log.error({ err }, 'Tick failed');
-    } finally {
-      this.ticking = false;
-    }
+    await Promise.all([
+      this.exclusive('sessions', async () => {
+        const active = this.repos.sessions.listActive();
+        await Promise.all(
+          active.map((s) =>
+            this.lock
+              .run(s.streamerId, () => this.tickSession(s.id))
+              .catch((err) => log.error({ err, sessionId: s.id }, 'Session tick failed')),
+          ),
+        );
+      }),
+      this.exclusive('summaries', () => this.retryPendingSummaries(false)),
+      this.exclusive('roles', () => this.maintainRoles()),
+    ]);
+  }
+
+  /**
+   * Reconciles live roles where they may be wrong: guilds with active or recently ended sessions and guilds
+   * with a failed role change. Called after the Discord gateway reconnects (role changes may have failed meanwhile).
+   */
+  async reconcileLiveRoles(): Promise<void> {
+    const now = this.clock();
+    const guilds = new Set([...this.sweepGuilds(now), ...this.roleRepairs.keys()]);
+    for (const guildId of guilds) await this.reconcileRolesOf(guildId, now);
   }
 
   // ───────────────────────────── monitor events ─────────────────────────────
@@ -322,13 +365,17 @@ export class SessionService implements SessionServiceApi {
         .catch((err) => log.error({ err, sessionId: active.id }, 'Session reconcile failed'));
     }
 
+    // Summaries that could not be published before the restart (Discord failure, crash mid-publish).
+    await this.retryPendingSummaries(true).catch((err) => log.error({ err }, 'Republishing pending summaries failed'));
+
     const guildIds = new Set([...this.repos.settings.listGuildIds(), ...this.repos.streamers.listAll().map((s) => s.guildId)]);
     for (const guildId of guildIds) {
       try {
         const result = await this.reconcileGuildRoles(guildId);
         if (result.added + result.removed > 0) log.info({ guildId, ...result }, 'Roles reconciled');
       } catch (err) {
-        log.warn({ err, guildId }, 'Role reconcile failed');
+        log.warn({ err, guildId }, 'Role reconcile failed; will retry');
+        this.scheduleRoleRepair(guildId);
       }
     }
   }
@@ -454,7 +501,9 @@ export class SessionService implements SessionServiceApi {
         this.repos.sessions.segments(recent.id).some((seg) => seg.channelId === channel.id && seg.streamId === snapshot.streamId);
       if (withinMerge || sameBroadcast) {
         this.cancelVodRetry(recent.id);
-        const resumed: LiveSession = { ...recent, status: 'live', endedAt: null };
+        this.forgetSummary(recent.id);
+        // The live message comes back, so a summary that was still pending is obsolete.
+        const resumed: LiveSession = { ...recent, status: 'live', endedAt: null, summaryPending: false, summaryAttempts: 0 };
         this.repos.sessions.save(resumed);
         log.info({ sessionId: resumed.id, streamerId: streamer.id, sameBroadcast }, 'Resumed live session');
         return { session: resumed, lifecycle: 'resumed' };
@@ -565,7 +614,11 @@ export class SessionService implements SessionServiceApi {
     this.dropRuntime(session.id);
     session.status = 'ended';
     session.endedAt = iso(endMs);
+    // Persisted together with the end, so a failed (or interrupted) publication is retried, even after a restart.
+    session.summaryPending = true;
+    session.summaryAttempts = 0;
     this.repos.sessions.save(session);
+    this.recentRoleGuilds.set(scope.guildId, now);
     log.info({ sessionId: session.id, streamerId: streamer.id, reason }, 'Live session ended');
 
     await this.setLiveRole(scope, false, 'انتهى البث');
@@ -729,20 +782,27 @@ export class SessionService implements SessionServiceApi {
     const rt = this.runtime(session.id);
     const ref = messageRefOf(session);
     if (ref) {
-      let exists: boolean;
+      let outcome: EditOutcome;
       try {
-        exists = await this.notifier.updateLive(ref, view);
+        outcome = await this.notifier.updateLive(ref, view);
       } catch (err) {
-        // Transient failure (Discord hiccup): never repost here or we could duplicate the message.
-        log.warn({ err, sessionId: session.id }, 'Live message edit failed; will retry');
-        rt.dirty = true;
-        return;
+        log.warn({ err, sessionId: session.id }, 'Live message edit threw');
+        outcome = 'transient';
       }
-      if (exists) {
+      if (outcome === 'ok') {
         this.markRendered(session, rt, signature, now);
         return;
       }
-      log.info({ sessionId: session.id, ref }, 'Live message is gone; posting a new one');
+      // Lost access only matters as "gone" when the admin moved notifications to another channel meanwhile.
+      const moved = !!view.settings.liveChannelId && view.settings.liveChannelId !== ref.channelId;
+      if (outcome === 'transient' || (outcome === 'forbidden' && !moved)) {
+        // The message still exists (Discord hiccup, or access lost for now): never repost here or it would be
+        // duplicated. Not marked rendered, so the next sync/tick edits it again.
+        log.warn({ sessionId: session.id, ref, outcome }, 'Live message edit failed; will retry');
+        rt.dirty = true;
+        return;
+      }
+      log.info({ sessionId: session.id, ref, outcome }, 'Live message is gone or unreachable; posting a new one');
     }
 
     rt.lastPostAttempt = now;
@@ -757,7 +817,7 @@ export class SessionService implements SessionServiceApi {
       session.messageId = posted.messageId;
       this.markRendered(session, rt, signature, now);
     } else if (ref) {
-      // The old message is confirmed gone; forget it so the next attempt posts instead of editing.
+      // The old message is gone (or unreachable in the old channel); forget it so the next attempt posts.
       session.messageChannelId = null;
       session.messageId = null;
       this.repos.sessions.save(session);
@@ -810,21 +870,98 @@ export class SessionService implements SessionServiceApi {
     return buildSummaryView({ guildId: session.guildId, settings, session, streamer, segments, imageUrl, now: this.clock() });
   }
 
+  /**
+   * Publishes the summary (or the minimal "ended" card). `summaryPending` is persisted before the attempt and
+   * cleared once Discord shows it (or there is nothing to show); a transient failure keeps the old ref and
+   * schedules a retry with backoff, giving up after `summaryMaxAttempts` with an audit warning.
+   */
   private async publishSummary(scope: Scope, session: LiveSession, thumbnail: string | null): Promise<SummaryView> {
     const summary = this.buildSummary(session, scope.streamer, scope.settings, thumbnail);
-    const ref = messageRefOf(session);
-    try {
-      const finalRef = await this.notifier.postSummary(ref, summary);
-      // A null result keeps the old ref: it may be a transient failure, and a resume will verify the message.
-      if (finalRef && (finalRef.channelId !== session.messageChannelId || finalRef.messageId !== session.messageId)) {
-        session.messageChannelId = finalRef.channelId;
-        session.messageId = finalRef.messageId;
-        this.repos.sessions.save(session);
-      }
-    } catch (err) {
-      log.warn({ err, sessionId: session.id }, 'Posting stream summary failed');
+    if (!session.summaryPending) {
+      session.summaryPending = true;
+      this.repos.sessions.save(session);
     }
+    this.summaryThumbnails.set(session.id, thumbnail);
+
+    let outcome: SummaryOutcome;
+    try {
+      outcome = await this.notifier.postSummary(messageRefOf(session), summary);
+    } catch (err) {
+      outcome = { status: 'transient', reason: errorMessage(err) };
+    }
+    if (outcome.status === 'transient') {
+      this.summaryFailed(scope, session, outcome.reason);
+      return summary;
+    }
+    if (outcome.status === 'done') {
+      session.messageChannelId = outcome.ref.channelId;
+      session.messageId = outcome.ref.messageId;
+    }
+    session.summaryPending = false;
+    session.summaryAttempts = 0;
+    this.repos.sessions.save(session);
+    this.forgetSummary(session.id);
     return summary;
+  }
+
+  private summaryFailed(scope: Scope, session: LiveSession, reason: string): void {
+    session.summaryAttempts += 1;
+    if (session.summaryAttempts >= this.timing.summaryMaxAttempts) {
+      session.summaryPending = false;
+      this.repos.sessions.save(session);
+      this.forgetSummary(session.id);
+      log.warn({ sessionId: session.id, attempts: session.summaryAttempts, reason }, 'Giving up publishing the stream summary');
+      this.audit.record({
+        guildId: scope.guildId,
+        action: 'live.summary_failed',
+        level: 'warn',
+        message: `ما قدرنا نحوّل إشعار بث ${scope.streamer.displayName} لملخص بعد محاولات لمدة يوم — تأكد إن البوت يقدر يوصل لروم إشعارات البث، والإشعار القديم ممكن يبقى "مباشر"`,
+        details: { sessionId: session.id, streamerId: scope.streamer.id, attempts: session.summaryAttempts, reason },
+        mirror: true,
+      });
+      return;
+    }
+    this.repos.sessions.save(session);
+    const delays = this.timing.summaryRetryDelaysMs;
+    const delay = delays[Math.min(session.summaryAttempts, delays.length) - 1] ?? 60 * 60_000;
+    this.summaryRetryAt.set(session.id, this.clock() + delay);
+    log.warn({ sessionId: session.id, attempts: session.summaryAttempts, reason, retryInMs: delay }, 'Publishing stream summary failed; will retry');
+  }
+
+  /** Retries due pending summaries (`all`: every pending one, used at startup). */
+  private async retryPendingSummaries(all: boolean): Promise<void> {
+    const now = this.clock();
+    const due = this.repos.sessions.listSummaryPending(SUMMARY_SCAN_LIMIT).filter((s) => all || (this.summaryRetryAt.get(s.id) ?? 0) <= now);
+    await Promise.all(
+      due.map((s) =>
+        this.lock
+          .run(s.streamerId, () => this.retrySummary(s.id, all))
+          .catch((err) => log.warn({ err, sessionId: s.id }, 'Summary retry failed')),
+      ),
+    );
+  }
+
+  private async retrySummary(sessionId: number, force: boolean): Promise<void> {
+    const session = this.repos.sessions.get(sessionId);
+    if (!session || session.status !== 'ended' || !session.summaryPending) {
+      this.forgetSummary(sessionId);
+      return;
+    }
+    // Re-checked under the lock: another path (end, VOD retry) may have just published or rescheduled it.
+    if (!force && (this.summaryRetryAt.get(sessionId) ?? 0) > this.clock()) return;
+    const scope = this.scopeOf(session);
+    if (!scope) {
+      session.summaryPending = false;
+      this.repos.sessions.save(session);
+      this.forgetSummary(sessionId);
+      return;
+    }
+    await this.publishSummary(scope, session, this.summaryThumbnails.get(sessionId) ?? null);
+  }
+
+  private forgetSummary(sessionId: number): void {
+    this.summaryRetryAt.delete(sessionId);
+    this.summaryThumbnails.delete(sessionId);
   }
 
   /** Best-effort VOD lookup for segments without one (parallel, bounded by a timeout each). */
@@ -875,7 +1012,7 @@ export class SessionService implements SessionServiceApi {
           if (!session || session.status !== 'ended') return;
           const vods = await this.lookupVods(sessionId);
           const scope = this.scopeOf(session);
-          if (vods.found > 0 && scope && messageRefOf(session)) await this.publishSummary(scope, session, thumbnail);
+          if (vods.found > 0 && scope && (messageRefOf(session) || session.summaryPending)) await this.publishSummary(scope, session, thumbnail);
           if (vods.missing > 0) this.scheduleVodRetry(streamerId, sessionId, thumbnail, attempt + 1);
         })
         .catch((err) => log.warn({ err, sessionId }, 'VOD retry failed'));
@@ -1023,10 +1160,82 @@ export class SessionService implements SessionServiceApi {
   }
 
   private async setLiveRole(scope: Scope, live: boolean, reason: string): Promise<void> {
+    let outcome: RoleChangeOutcome;
     try {
-      await this.roles.setLive(scope.guildId, scope.streamer.discordUserId, live, reason);
+      outcome = await this.roles.setLive(scope.guildId, scope.streamer.discordUserId, live, reason);
     } catch (err) {
       log.warn({ err, guildId: scope.guildId, streamerId: scope.streamer.id, live }, 'Updating live role failed');
+      outcome = 'transient';
+    }
+    // The reconcile computes the desired state from the DB when it runs, so it can never undo a newer change.
+    if (outcome === 'transient') this.scheduleRoleRepair(scope.guildId);
+  }
+
+  // ───────────────────────────── role maintenance ─────────────────────────────
+
+  private scheduleRoleRepair(guildId: string): void {
+    if (this.roleRepairs.has(guildId)) return;
+    const now = this.clock();
+    this.roleRepairs.set(guildId, { dueAt: now + this.roleRetryDelay(0), attempt: 0, since: now });
+  }
+
+  private roleRetryDelay(attempt: number): number {
+    const delays = this.timing.roleRetryDelaysMs;
+    return delays[Math.min(attempt, delays.length - 1)] ?? this.timing.roleReconcileMs;
+  }
+
+  /** Guilds with an active session or one that ended recently (prunes expired entries). */
+  private sweepGuilds(now: number): Set<string> {
+    const guilds = new Set(this.repos.sessions.listActive().map((s) => s.guildId));
+    for (const [guildId, endedAt] of this.recentRoleGuilds) {
+      if (now - endedAt <= RECENT_ROLE_GUILD_MS) guilds.add(guildId);
+      else this.recentRoleGuilds.delete(guildId);
+    }
+    return guilds;
+  }
+
+  /** Due role repairs, plus the periodic reconcile of guilds with active or recently ended sessions. */
+  private async maintainRoles(): Promise<void> {
+    const now = this.clock();
+    const guilds = new Set<string>();
+    for (const [guildId, repair] of this.roleRepairs) if (repair.dueAt <= now) guilds.add(guildId);
+    if (now - this.lastRoleSweepAt >= this.timing.roleReconcileMs) {
+      this.lastRoleSweepAt = now;
+      for (const guildId of this.sweepGuilds(now)) guilds.add(guildId);
+    }
+    for (const guildId of guilds) await this.reconcileRolesOf(guildId, now);
+  }
+
+  private async reconcileRolesOf(guildId: string, now: number): Promise<void> {
+    try {
+      const result = await this.reconcileGuildRoles(guildId);
+      this.roleRepairs.delete(guildId);
+      if (result.added + result.removed > 0) log.info({ guildId, ...result }, 'Live roles repaired');
+    } catch (err) {
+      const previous = this.roleRepairs.get(guildId);
+      const since = previous?.since ?? now;
+      if (now - since >= ROLE_REPAIR_MAX_AGE_MS) {
+        this.roleRepairs.delete(guildId);
+        log.warn({ guildId, err: errorMessage(err) }, 'Giving up repairing roles');
+        return;
+      }
+      const attempt = previous ? previous.attempt + 1 : 0;
+      this.roleRepairs.set(guildId, { dueAt: now + this.roleRetryDelay(attempt), attempt, since });
+      if (attempt === 0) log.warn({ guildId, err: errorMessage(err) }, 'Role reconcile failed; will retry');
+      else log.debug({ guildId, attempt, err: errorMessage(err) }, 'Role reconcile failed again');
+    }
+  }
+
+  /** Runs one maintenance pass of a kind at a time; never throws. */
+  private async exclusive(kind: string, fn: () => Promise<void>): Promise<void> {
+    if (this.busy.has(kind)) return;
+    this.busy.add(kind);
+    try {
+      await fn();
+    } catch (err) {
+      log.error({ err, kind }, 'Maintenance pass failed');
+    } finally {
+      this.busy.delete(kind);
     }
   }
 

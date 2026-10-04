@@ -15,7 +15,7 @@ import type { Repositories } from '../db/repositories.js';
 import type { PlatformProvider } from '../platforms/types.js';
 import type { AccountInput, CreateStreamerRequest, UpdateAccountRequest, UpdateStreamerRequest } from '../shared/api.js';
 import type { AuditService } from './audit.js';
-import type { DiscordGateway, DiscordMemberInfo, MonitorControl, RoleManager } from './ports.js';
+import type { DiscordGateway, DiscordMemberInfo, MonitorControl, RoleChangeOutcome, RoleManager } from './ports.js';
 import { platformListAr } from './views.js';
 
 const log = childLogger('streamers');
@@ -31,6 +31,8 @@ export interface StreamerServiceDeps {
 }
 
 const SNOWFLAKE_RE = /^\d{17,20}$/;
+/** The monitor's per-channel content baseline record (same format as `seedKey` in src/monitor/monitor.ts). */
+const contentSeedKey = (channelId: number): string => `monitor:content-seed:${channelId}`;
 export const MAX_ACCOUNTS_PER_STREAMER = 12;
 export const MAX_ACCOUNT_INPUT_LENGTH = 300;
 const MAX_NAME_LENGTH = 64;
@@ -129,9 +131,11 @@ export class StreamerService implements StreamerServiceApi {
     let streamerId: number;
     try {
       streamerId = this.repos.tx(() => {
+        const tracked = this.trackedChannelIds();
         const streamer = this.repos.streamers.create({ guildId, discordUserId: userId, displayName, notes, color });
         for (const { input, channel } of resolved) {
           const stored = this.repos.channels.upsertResolved(channel);
+          if (!tracked.has(stored.id)) this.resetContentSeed(stored.id);
           this.repos.accounts.create({
             streamerId: streamer.id,
             channelId: stored.id,
@@ -182,7 +186,15 @@ export class StreamerService implements StreamerServiceApi {
       if (typeof patch.enabled !== 'boolean') throw new ValidationError('قيمة التفعيل غير صحيحة', 'enabled');
       changes.enabled = patch.enabled;
     }
-    this.repos.streamers.update(streamerId, changes);
+    const enabling = changes.enabled === true && !current.enabled;
+    this.repos.tx(() => {
+      const tracked = enabling ? this.trackedChannelIds() : null;
+      this.repos.streamers.update(streamerId, changes);
+      if (!tracked) return;
+      for (const account of this.repos.accounts.listForStreamer(streamerId)) {
+        if (!tracked.has(account.channelId)) this.resetContentSeed(account.channelId);
+      }
+    });
 
     const settings = this.repos.settings.get(guildId);
     const name = changes.displayName ?? current.displayName;
@@ -197,7 +209,7 @@ export class StreamerService implements StreamerServiceApi {
       }
       this.channelsChanged([]);
       message = `تم إيقاف الستريمر ${name}`;
-    } else if (changes.enabled === true && !current.enabled) {
+    } else if (enabling) {
       if (settings.options.autoStreamerRole && settings.streamerRoleId) {
         await this.setStreamerRole(guildId, current.discordUserId, true, 'تم تفعيل الستريمر');
       }
@@ -215,7 +227,18 @@ export class StreamerService implements StreamerServiceApi {
 
     if (current.enabled) this.repos.streamers.update(streamerId, { enabled: false });
     await this.endSession(streamerId, 'deleted');
-    await this.setLiveRole(guildId, current.discordUserId, false, 'تم حذف الستريمر');
+    const liveRole = await this.setLiveRole(guildId, current.discordUserId, false, 'تم حذف الستريمر');
+    if (liveRole === 'transient') {
+      // Once deleted, the member is no longer a registered streamer, so role reconciles will not touch them again.
+      this.audit.record({
+        guildId,
+        actor,
+        action: 'discord.roles',
+        level: 'warn',
+        message: `ما قدرنا نشيل رتبة البث المباشر من ${current.displayName} بسبب مشكلة مؤقتة في ديسكورد — إذا بقت عنده شيلها يدوياً`,
+        details: { streamerId, discordUserId: current.discordUserId },
+      });
+    }
     if (settings.options.removeStreamerRoleOnDelete && settings.streamerRoleId) {
       await this.setStreamerRole(guildId, current.discordUserId, false, 'تم حذف الستريمر');
     }
@@ -249,7 +272,9 @@ export class StreamerService implements StreamerServiceApi {
     }
 
     const created = this.repos.tx(() => {
+      const tracked = this.repos.streamers.get(streamerId)?.enabled ? this.trackedChannelIds() : null;
       const channel = this.repos.channels.upsertResolved(resolved);
+      if (tracked && !tracked.has(channel.id)) this.resetContentSeed(channel.id);
       return this.repos.accounts.create({
         streamerId,
         channelId: channel.id,
@@ -302,18 +327,20 @@ export class StreamerService implements StreamerServiceApi {
     const streamer = this.get(guildId, streamerId);
     const account = this.ownedAccount(streamer, accountId);
 
-    // If this was the only platform keeping the live session open, end it properly (summary + role) first.
+    // If this was the only platform keeping the live session open, end it properly (summary + role).
     // Otherwise the session drops the platform on its next tick.
     const active = this.repos.sessions.getActive(streamerId);
-    if (active) {
-      const open = this.repos.sessions.segments(active.id).filter((s) => !s.endedAt);
-      if (open.length > 0 && open.every((s) => s.channelId === account.channelId)) await this.endSession(streamerId, 'account-removed');
-    }
+    const open = active ? this.repos.sessions.segments(active.id).filter((s) => !s.endedAt) : [];
+    const endsSession = open.length > 0 && open.every((s) => s.channelId === account.channelId);
 
+    // Delete the account before ending the session: a live update queued behind endSession (it holds the
+    // streamer lock for seconds: VOD lookup, Discord edit) then finds no account and cannot resume the session.
+    // The channel row survives while its segments reference it, so the summary still renders.
     const orphaned = this.repos.tx(() => {
       this.repos.accounts.delete(accountId);
       return this.repos.channels.deleteOrphans();
     });
+    if (endsSession) await this.endSession(streamerId, 'account-removed');
     this.audit.record({
       guildId,
       actor,
@@ -438,11 +465,12 @@ export class StreamerService implements StreamerServiceApi {
     }
   }
 
-  private async setLiveRole(guildId: string, userId: string, live: boolean, reason: string): Promise<void> {
+  private async setLiveRole(guildId: string, userId: string, live: boolean, reason: string): Promise<RoleChangeOutcome> {
     try {
-      await this.roles.setLive(guildId, userId, live, reason);
+      return await this.roles.setLive(guildId, userId, live, reason);
     } catch (err) {
       log.warn({ err, guildId, userId }, 'Updating live role failed');
+      return 'transient';
     }
   }
 
@@ -452,6 +480,20 @@ export class StreamerService implements StreamerServiceApi {
     } catch (err) {
       log.warn({ err, guildId, userId }, 'Updating streamer role failed');
     }
+  }
+
+  /** Ids of the channels at least one enabled streamer tracks (read inside the write tx, before linking). */
+  private trackedChannelIds(): Set<number> {
+    return new Set(this.repos.channels.listTracked().map((c) => c.id));
+  }
+
+  /**
+   * A channel that becomes tracked again (kept in the DB for session history, or its streamer re-enabled) must be
+   * baselined silently again; otherwise uploads published while nobody tracked it are announced as new.
+   */
+  private resetContentSeed(channelId: number): void {
+    this.repos.channels.resetContentSeed(channelId);
+    this.repos.kv.delete(contentSeedKey(channelId));
   }
 
   /** Tells the monitor the tracked set changed, then asks for immediate checks of the given channels. */

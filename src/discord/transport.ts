@@ -4,6 +4,7 @@
  * implementation on top of discord.js.
  */
 import type { Client, GuildBasedChannel, GuildMember, SendableChannels } from 'discord.js';
+import { PermissionFlagsBits } from 'discord.js';
 import { childLogger } from '../core/logger.js';
 import type { MessageRef } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
@@ -17,7 +18,10 @@ const log = childLogger('discord.transport');
 
 export interface OutgoingMessage extends MessageContent {
   allowedMentions: AllowedMentions;
-  /** Files uploaded with a new message (referenced from embeds as attachment://name). Ignored on edits. */
+  /**
+   * Files uploaded with the message (referenced from embeds as attachment://name). An edit always replaces the
+   * message's attachments with these (none when omitted), so a re-rendered summary never piles up old uploads.
+   */
   files?: MessageFile[];
 }
 
@@ -70,18 +74,22 @@ function fromError(err: unknown, forEdit: boolean, channelName?: string): Extrac
   }
 }
 
+function uploads(files: MessageFile[]): Array<{ attachment: Buffer; name: string }> {
+  return files.map((f) => ({ attachment: f.data, name: f.name }));
+}
+
 export class DiscordTransport implements MessageTransport {
   constructor(private readonly getClient: () => Client | null) {}
 
   async send(guildId: string, channelId: string, message: OutgoingMessage): Promise<TransportResult> {
-    const resolved = await this.resolve(guildId, channelId);
+    const resolved = await this.resolve(guildId, channelId, { precheck: true, files: !!message.files?.length });
     if (!resolved.ok) return resolved;
     try {
       const sent = await resolved.channel.send({
         content: message.content || undefined,
         embeds: message.embeds,
         components: message.components,
-        ...(message.files?.length ? { files: message.files.map((f) => ({ attachment: f.data, name: f.name })) } : {}),
+        ...(message.files?.length ? { files: uploads(message.files) } : {}),
         allowedMentions: message.allowedMentions,
       });
       return { ok: true, ref: { channelId: sent.channelId, messageId: sent.id } };
@@ -92,16 +100,19 @@ export class DiscordTransport implements MessageTransport {
 
   async edit(guildId: string, ref: MessageRef, message: OutgoingMessage): Promise<TransportResult> {
     if (!isSnowflake(ref.messageId)) return failure('gone', `invalid message id ${ref.messageId}`);
-    // Editing our own message needs no send permission, so only resolve the channel (no permission pre-check).
-    const resolved = await this.resolve(guildId, ref.channelId, { precheck: false });
+    // Editing our own message needs no send permission, so only resolve the channel (no posting pre-check).
+    const resolved = await this.resolve(guildId, ref.channelId, { precheck: false, files: !!message.files?.length });
     if (!resolved.ok) return resolved;
     try {
       // `content` is always sent so an edit can also clear old text (e.g. the ping when turning into a summary),
-      // and allowedMentions is explicit because Discord re-parses mentions on edit.
+      // and allowedMentions is explicit because Discord re-parses mentions on edit. `attachments: []` drops earlier
+      // uploads (a fresh array each time: discord.js appends the new files to it).
       const edited = await resolved.channel.messages.edit(ref.messageId, {
         content: message.content,
         embeds: message.embeds,
         components: message.components,
+        attachments: [],
+        ...(message.files?.length ? { files: uploads(message.files) } : {}),
         allowedMentions: message.allowedMentions,
       });
       return { ok: true, ref: { channelId: edited.channelId, messageId: edited.id } };
@@ -110,7 +121,8 @@ export class DiscordTransport implements MessageTransport {
     }
   }
 
-  private async resolve(guildId: string, channelId: string, opts: { precheck: boolean } = { precheck: true }): Promise<Resolved> {
+  /** `precheck`: posting permissions; `files`: Attach Files (checked for edits too, uploads need it either way). */
+  private async resolve(guildId: string, channelId: string, opts: { precheck: boolean; files?: boolean }): Promise<Resolved> {
     const client = this.getClient();
     if (!client?.isReady()) return failure('not_ready', 'Discord client is not ready');
     if (!isSnowflake(channelId)) return failure('channel_missing', `invalid channel id ${channelId}`);
@@ -128,11 +140,12 @@ export class DiscordTransport implements MessageTransport {
     if (channel.guildId !== guildId) return failure('wrong_guild', `channel ${channelId} belongs to guild ${channel.guildId}`);
     if (!channel.isTextBased() || !channel.isSendable()) return failure('not_text', `channel ${channelId} is not text based`, { channelName: channel.name });
 
-    if (opts.precheck) {
+    if (opts.precheck || opts.files) {
       const me: GuildMember | null = channel.guild.members.me;
       const perms = me ? channel.permissionsFor(me) : null;
       if (perms) {
-        const missing = missingPostingPermissions((flag) => perms.has(flag), channel.isThread());
+        const missing: PermissionName[] = opts.precheck ? missingPostingPermissions((flag) => perms.has(flag), channel.isThread()) : [];
+        if (opts.files && !perms.has(PermissionFlagsBits.AttachFiles)) missing.push('AttachFiles');
         if (missing.length > 0) return failure('forbidden', `missing ${missing.join(', ')}`, { missing, channelName: channel.name });
       } else {
         log.debug({ guildId, channelId }, 'Bot member not cached; skipping permission pre-check');

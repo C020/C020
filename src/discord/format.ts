@@ -45,14 +45,17 @@ export function discordTimestamp(value: string | number | null | undefined, styl
 }
 
 const MARKDOWN_CHARS_RE = /[\\*_~`|<>[\]#-]/g;
-// Bidi overrides and zero-width characters can visually scramble RTL messages; titles never need them.
-const INVISIBLE_RE = /[​-‍‪-‮⁠-⁤⁦-⁩﻿]/g;
+// Bidi overrides and invisible characters can visually scramble RTL messages; titles never need them.
+// The zero-width joiner/non-joiner (U+200D/U+200C) are kept: they build composite emojis (👨‍💻, 🏳️‍🌈) and carry
+// meaning in Persian text. Only joiners that join nothing (at the edges of a word) are dropped.
+const INVISIBLE_RE = /[\u200B\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+const STRAY_JOINER_RE = /(^|\s)[\u200C\u200D]+|[\u200C\u200D]+(?=\s|$)/g;
 const CONTROL_RE = /[\u0000-\u0008\u000B-\u001F\u007F]/g;
 
 /** Normalizes untrusted single-line text (titles, names, categories) without escaping it. */
 export function cleanText(value: string | null | undefined): string {
   if (!value) return '';
-  return value.replace(INVISIBLE_RE, '').replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim();
+  return value.replace(INVISIBLE_RE, '').replace(CONTROL_RE, ' ').replace(STRAY_JOINER_RE, '$1').replace(/\s+/g, ' ').trim();
 }
 
 /** Prevents "@everyone"/"@here" in untrusted text from looking like (or acting as) a mass mention. */

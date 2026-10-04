@@ -3,20 +3,27 @@
  * through a MessageTransport, so this logic is unit-tested with a fake transport.
  *
  * Failure policy
- * - Live edit: message/channel gone or access lost → false (caller reposts). Transient errors → true, so a
- *   Discord hiccup never produces duplicate live messages.
+ * - Live edit: message/channel gone → 'gone' (caller reposts). Access lost → 'forbidden' (the message still
+ *   exists: caller keeps the ref and retries). Network/5xx/not ready → 'transient' (caller retries, never
+ *   reposts, so a Discord hiccup never produces duplicate live messages). A payload Discord refuses is reported
+ *   and treated as rendered ('ok'): resending the same payload cannot succeed, the next change re-renders.
  * - Summary: edit the live message; post a new one only when the old one is really gone (never on a
- *   transient failure) and summaries are enabled.
- * - Configuration problems (missing permission, deleted channel...) become ONE Arabic audit warning per
- *   guild/channel/problem per hour. Problems with the log channel are never mirrored to the log channel.
- * - A payload rejected while custom platform emojis are in use is retried once with unicode emojis.
+ *   transient failure) and summaries are enabled. Every failure that may heal is returned as 'transient' so
+ *   the caller retries later; a refused summary falls back to the minimal "stream ended" card.
+ * - Configuration problems (missing permission, deleted channel...) and transient delivery failures become
+ *   ONE Arabic audit warning per guild/channel/problem per hour. Problems with the log channel are never
+ *   mirrored to the log channel.
+ * - A payload rejected while custom platform emojis are in use is retried once with unicode emojis; the
+ *   custom emojis are only turned off when that retry succeeds.
+ * - Expiring images (TikTok CDN) are uploaded as attachments; without Attach Files the message is sent with
+ *   the linked image instead.
  */
 import type { APIEmbed } from 'discord.js';
 import { childLogger } from '../core/logger.js';
 import type { AuditLevel } from '../db/models.js';
 import type { Repositories } from '../db/repositories.js';
 import type { AuditService } from '../services/audit.js';
-import type { ContentView, LiveView, MessageRef, Notifier, SummaryView } from '../services/ports.js';
+import type { ContentView, EditOutcome, LiveView, MessageRef, Notifier, SummaryOutcome, SummaryView } from '../services/ports.js';
 import { fetchImage, type ImageFetcher, rehostExpiringImages } from './attachments.js';
 import { DEFAULT_PLATFORM_EMOJIS, hasCustomEmojis, type PlatformEmojis } from './emojis.js';
 import { escapeMarkdown, truncate } from './format.js';
@@ -47,10 +54,10 @@ const PURPOSE_LABELS: Record<ChannelPurpose, string> = {
 
 type Failure = Extract<TransportResult, { ok: false }>;
 
-/** Edit failures meaning "this message can't be edited any more" (vs. transient errors). */
-const UNEDITABLE = new Set<Failure['reason']>(['gone', 'channel_missing', 'wrong_guild', 'not_text', 'forbidden']);
+/** Edit failures meaning "this message no longer exists" (vs. lost access or transient errors). */
+const GONE = new Set<Failure['reason']>(['gone', 'channel_missing', 'wrong_guild', 'not_text']);
 
-/** Arabic, admin-facing explanation of a configuration failure; null for transient/unknown failures. */
+/** Arabic, admin-facing explanation of a delivery failure; null when admins need not see it (client not ready). */
 export function failureMessageAr(result: Failure, purpose: ChannelPurpose, channelId: string): string | null {
   const label = PURPOSE_LABELS[purpose];
   const where = result.channelName ? `#${result.channelName}` : channelId;
@@ -67,6 +74,8 @@ export function failureMessageAr(result: Failure, purpose: ChannelPurpose, chann
       return `روم ${label} المحدد (${where}) مو روم كتابي — اختر روم نصي أو روم إعلانات`;
     case 'invalid':
       return `ديسكورد رفض رسالة ${label} — راجع قالب الرسالة (روابط أو نصوص غير صالحة)`;
+    case 'error':
+      return `تعذّر إيصال رسالة ${label} (${where}) لديسكورد — غالباً خلل مؤقت في ديسكورد أو الشبكة`;
     default:
       return null;
   }
@@ -219,46 +228,66 @@ export class DiscordNotifier implements Notifier {
     return null;
   }
 
-  async updateLive(ref: MessageRef, view: LiveView): Promise<boolean> {
+  async updateLive(ref: MessageRef, view: LiveView): Promise<EditOutcome> {
     const result = await this.deliver(this.liveBuilder(view), (message) => this.transport.edit(view.guildId, ref, message));
-    if (result.ok) return true;
-    if (UNEDITABLE.has(result.reason)) {
-      if (result.reason === 'forbidden') this.reportFailure(view.guildId, ref.channelId, 'live', result);
-      log.info({ guildId: view.guildId, ref, reason: result.reason }, 'Live message can no longer be edited');
-      return false;
+    if (result.ok) return 'ok';
+    if (GONE.has(result.reason)) {
+      log.info({ guildId: view.guildId, ref, reason: result.reason }, 'Live message no longer exists');
+      return 'gone';
     }
-    if (result.reason === 'invalid') this.reportFailure(view.guildId, ref.channelId, 'live', result);
-    log.warn({ guildId: view.guildId, ref, reason: result.reason, detail: result.detail }, 'Editing live message failed; keeping it');
-    return true;
+    if (result.reason === 'forbidden') {
+      this.reportFailure(view.guildId, ref.channelId, 'live', result);
+      return 'forbidden';
+    }
+    if (result.reason === 'invalid') {
+      // Resending the same payload cannot succeed; the next change (or periodic refresh) renders a new one.
+      this.reportFailure(view.guildId, ref.channelId, 'live', result);
+      return 'ok';
+    }
+    log.warn({ guildId: view.guildId, ref, reason: result.reason, detail: result.detail }, 'Editing live message failed; will retry');
+    return 'transient';
   }
 
   // ───────────── summary ─────────────
 
-  async postSummary(ref: MessageRef | null, view: SummaryView): Promise<MessageRef | null> {
+  async postSummary(ref: MessageRef | null, view: SummaryView): Promise<SummaryOutcome> {
     const enabled = view.settings.options.summaryEnabled;
-    const build = (emojis: PlatformEmojis): OutgoingMessage => {
-      const options = this.renderOptions(view.guildId, view.streamer.discordUserId, emojis);
-      const message = enabled ? buildSummaryMessage(view, options) : buildEndedMessage(view, options);
-      return { ...message, allowedMentions: silentMentions() };
+    const channelId = view.settings.liveChannelId;
+    const builder =
+      (minimal: boolean) =>
+      (emojis: PlatformEmojis): OutgoingMessage => {
+        const options = this.renderOptions(view.guildId, view.streamer.discordUserId, emojis);
+        const message = enabled && !minimal ? buildSummaryMessage(view, options) : buildEndedMessage(view, options);
+        return { ...message, allowedMentions: silentMentions() };
+      };
+    /** Full summary first; a summary Discord refuses must still replace the LIVE card, so retry with the minimal one. */
+    const publish = async (target: string, op: (message: OutgoingMessage) => Promise<TransportResult>): Promise<TransportResult> => {
+      const deliverOp = (message: OutgoingMessage) => this.withRehostedImages(view.guildId, target, 'live', message, op);
+      const first = await this.deliver(builder(false), deliverOp);
+      if (first.ok || first.reason !== 'invalid') return first;
+      this.reportFailure(view.guildId, target, 'live', first);
+      return enabled ? this.deliver(builder(true), deliverOp) : first;
     };
 
     if (ref) {
-      const edited = await this.deliver(build, (message) => this.transport.edit(view.guildId, ref, message));
-      if (edited.ok) return edited.ref;
-      if (!UNEDITABLE.has(edited.reason)) {
-        if (edited.reason === 'invalid') this.reportFailure(view.guildId, ref.channelId, 'live', edited);
-        log.warn({ guildId: view.guildId, ref, reason: edited.reason, detail: edited.detail }, 'Editing message into summary failed');
-        return null;
+      const edited = await publish(ref.channelId, (message) => this.transport.edit(view.guildId, ref, message));
+      if (edited.ok) return { status: 'done', ref: edited.ref };
+      if (edited.reason === 'forbidden') {
+        this.reportFailure(view.guildId, ref.channelId, 'live', edited);
+        // The old message still exists. Only when the admin moved the live channel does the summary go there instead.
+        if (!enabled || !channelId || channelId === ref.channelId) return { status: 'transient', reason: edited.reason };
+      } else if (!GONE.has(edited.reason)) {
+        if (edited.reason !== 'invalid') this.reportFailure(view.guildId, ref.channelId, 'live', edited);
+        log.warn({ guildId: view.guildId, ref, reason: edited.reason, detail: edited.detail }, 'Editing message into summary failed; will retry');
+        return { status: 'transient', reason: edited.reason };
       }
-      if (edited.reason === 'forbidden') this.reportFailure(view.guildId, ref.channelId, 'live', edited);
     }
 
-    const channelId = view.settings.liveChannelId;
-    if (!enabled || !channelId) return null;
-    const posted = await this.deliver(build, (message) => this.transport.send(view.guildId, channelId, message));
-    if (posted.ok) return posted.ref;
-    this.reportFailure(view.guildId, channelId, 'live', posted);
-    return null;
+    if (!enabled || !channelId) return { status: 'skipped' };
+    const posted = await publish(channelId, (message) => this.transport.send(view.guildId, channelId, message));
+    if (posted.ok) return { status: 'done', ref: posted.ref };
+    if (posted.reason !== 'invalid') this.reportFailure(view.guildId, channelId, 'live', posted);
+    return { status: 'transient', reason: posted.reason };
   }
 
   // ───────────── content ─────────────
@@ -268,11 +297,8 @@ export class DiscordNotifier implements Notifier {
     if (!channelId) return null;
     const result = await this.deliver(
       (emojis) => this.withPing(buildContentMessage(view, this.renderOptions(view.guildId, view.streamer.discordUserId, emojis)), view),
-      // Content posts are never edited later, so expiring thumbnails (TikTok) are uploaded as attachments.
-      async (message) => {
-        const { embeds, files } = await rehostExpiringImages(message.embeds, this.fetchImage);
-        return this.transport.send(view.guildId, channelId, files.length ? { ...message, embeds, files } : message);
-      },
+      // Expiring thumbnails (TikTok) are uploaded as attachments so the post keeps its image.
+      (message) => this.withRehostedImages(view.guildId, channelId, 'content', message, (m) => this.transport.send(view.guildId, channelId, m)),
     );
     if (result.ok) return result.ref;
     this.reportFailure(view.guildId, channelId, 'content', result);
@@ -331,8 +357,31 @@ export class DiscordNotifier implements Notifier {
     const first = await this.attempt(op, build, emojis);
     if (first.ok || first.reason !== 'invalid' || !hasCustomEmojis(emojis)) return first;
     log.warn({ detail: first.detail }, 'Discord rejected a message with custom emojis; retrying with unicode emojis');
-    this.onCustomEmojisRejected();
-    return this.attempt(op, build, DEFAULT_PLATFORM_EMOJIS);
+    const second = await this.attempt(op, build, DEFAULT_PLATFORM_EMOJIS);
+    // Most 400s have nothing to do with emojis: only blame them when the unicode version went through.
+    if (second.ok) this.onCustomEmojisRejected();
+    return second;
+  }
+
+  /**
+   * Runs `op` with expiring embed images re-hosted as attachments. When Discord refuses the upload (no Attach
+   * Files), the original message (linked images, no files) is sent instead and the admin is warned once per hour.
+   */
+  private async withRehostedImages(
+    guildId: string,
+    channelId: string,
+    purpose: ChannelPurpose,
+    message: OutgoingMessage,
+    op: (message: OutgoingMessage) => Promise<TransportResult>,
+  ): Promise<TransportResult> {
+    const { embeds, files } = await rehostExpiringImages(message.embeds, this.fetchImage);
+    if (files.length === 0) return op(message);
+    const result = await op({ ...message, embeds, files });
+    // A pre-check that found other missing permissions would fail the plain message too.
+    if (result.ok || result.reason !== 'forbidden' || result.missing?.some((name) => name !== 'AttachFiles')) return result;
+    const fallback = await op(message);
+    if (fallback.ok) this.warnAttachFiles(guildId, channelId, purpose, result.channelName);
+    return fallback;
   }
 
   private async attempt(
@@ -362,6 +411,20 @@ export class DiscordNotifier implements Notifier {
       message,
       details: { channelId, purpose, reason: result.reason, detail: truncate(result.detail, 300), missing: result.missing ?? [] },
       // Never mirror log-channel problems into the log channel (it would fail again, forever).
+      mirror: purpose !== 'log',
+    });
+  }
+
+  private warnAttachFiles(guildId: string, channelId: string, purpose: ChannelPurpose, channelName: string | undefined): void {
+    log.warn({ guildId, channelId, purpose }, 'Image upload refused (Attach Files missing); sent the linked image instead');
+    if (!this.throttle.allow(`${guildId}:${channelId}:attach_files`)) return;
+    const where = channelName ? `#${channelName}` : channelId;
+    this.audit.record({
+      guildId,
+      action: 'discord.delivery',
+      level: 'warn',
+      message: `البوت ما عنده صلاحية ${permissionListAr(['AttachFiles'])} في روم ${PURPOSE_LABELS[purpose]} (${where}) — أرسلنا الصورة كرابط، وصور تيك توك تنتهي صلاحيتها وتختفي بعد فترة`,
+      details: { channelId, purpose, reason: 'forbidden', missing: ['AttachFiles'] },
       mirror: purpose !== 'log',
     });
   }

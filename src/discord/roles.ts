@@ -2,7 +2,8 @@
  * RoleManager on top of discord.js. Every role change for a guild runs through one FIFO queue, so a live
  * start and a reconcile can never race each other. Public methods never throw except `reconcile`, which
  * reports guild-level problems (bot offline / not in guild) as Arabic ValidationErrors for the dashboard;
- * per-role and per-member problems are skipped with a throttled audit warning instead.
+ * per-role and per-member problems are skipped with a throttled audit warning instead. Single changes report a
+ * RoleChangeOutcome so callers can retry the 'transient' ones (Discord not ready, REST/network errors).
  */
 import type { Client, Collection, Guild, GuildMember, Role } from 'discord.js';
 import { DiscordjsErrorCodes, PermissionFlagsBits } from 'discord.js';
@@ -11,9 +12,9 @@ import { childLogger } from '../core/logger.js';
 import type { GuildSettings } from '../db/models.js';
 import type { Repositories } from '../db/repositories.js';
 import type { AuditService } from '../services/audit.js';
-import type { RoleManager } from '../services/ports.js';
+import type { RoleChangeOutcome, RoleManager } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
-import { decideRoleAssignability } from './permissions.js';
+import { decideRoleAssignability, type RoleAssignDecision } from './permissions.js';
 import { isSnowflake, KeyedQueue, WarnThrottle } from './util.js';
 
 const log = childLogger('discord.roles');
@@ -53,10 +54,8 @@ export interface RoleServiceDeps {
   onMembersFetch?: (guildId: string, ok: boolean) => void;
 }
 
-interface RoleTarget {
-  guild: Guild;
-  role: Role;
-}
+/** Why a role could not be used: 'config' needs an admin fix (missing role, hierarchy...), 'transient' may succeed later. */
+type RoleProblem = Extract<RoleChangeOutcome, 'config' | 'transient'>;
 
 export class DiscordRoles implements RoleManager {
   private readonly queue = new KeyedQueue();
@@ -74,12 +73,55 @@ export class DiscordRoles implements RoleManager {
     this.onMembersFetch = deps.onMembersFetch ?? (() => {});
   }
 
-  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<void> {
+  setLive(guildId: string, userId: string, live: boolean, reason: string): Promise<RoleChangeOutcome> {
     return this.apply(guildId, userId, 'live', live, reason);
   }
 
-  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<void> {
+  setStreamer(guildId: string, userId: string, isStreamer: boolean, reason: string): Promise<RoleChangeOutcome> {
     return this.apply(guildId, userId, 'streamer', isStreamer, reason);
+  }
+
+  /**
+   * Removes a role that is no longer configured (e.g. the previous "Streaming Now" role) from the given members.
+   * Members who do not hold it are skipped; a deleted role means nobody holds it anymore. Never throws.
+   */
+  removeRoleFrom(guildId: string, roleId: string, userIds: string[], reason: string): Promise<void> {
+    const targets = [...new Set(userIds)].filter(isSnowflake);
+    if (targets.length === 0 || !isSnowflake(roleId) || roleId === guildId) return Promise.resolve();
+    return this.queue
+      .run(guildId, async () => {
+        const client = this.getClient();
+        if (!client?.isReady()) {
+          log.warn({ guildId, roleId }, 'Discord not ready; old role cleanup skipped');
+          return;
+        }
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) return;
+        // Settings changed back before this ran: the role is managed again (reconcile owns it now).
+        const settings = this.repos.settings.get(guildId);
+        if (roleId === settings.liveRoleId || roleId === settings.streamerRoleId) return;
+        let role: Role | null = guild.roles.cache.get(roleId) ?? null;
+        if (!role) {
+          role = await guild.roles.fetch(roleId).catch((err: unknown) => {
+            log.warn({ guildId, roleId, err: describeDiscordError(err) }, 'Role fetch failed; old role cleanup skipped');
+            return null;
+          });
+        }
+        // A deleted role is held by nobody anymore.
+        if (!role) return;
+        const decision = await this.assignability(guild, role);
+        if (decision === 'transient') return;
+        if (!decision.ok) {
+          this.warn(guildId, `old_role:${decision.code}:${role.id}`, `ما قدر البوت يشيل رتبة ${role.name} القديمة من الستريمرز: ${decision.message}`);
+          return;
+        }
+        for (const userId of targets) {
+          const member = await this.fetchMember(guild, userId);
+          if (typeof member === 'string' || !member.roles.cache.has(role.id)) continue;
+          await this.change(guild, role, member, false, reason, 'live');
+        }
+      })
+      .catch((err) => log.error({ err, guildId, roleId }, 'Removing old role failed unexpectedly'));
   }
 
   async reconcile(guildId: string, liveUserIds: Set<string>, streamerUserIds: Set<string>): Promise<{ added: number; removed: number }> {
@@ -90,8 +132,11 @@ export class DiscordRoles implements RoleManager {
       if (!guild) throw new ValidationError('البوت مو موجود في هذا السيرفر');
 
       const settings = this.repos.settings.get(guildId);
+      // The bot only ever gives the live role to registered streamers, so only they can lose it here: an existing,
+      // widely held role picked as "Streaming Now" must not be stripped from everyone else.
+      const registered = new Set(this.repos.streamers.list(guildId).map((s) => s.discordUserId));
       const targets: Array<{ kind: RoleKind; roleId: string | null; desired: Set<string>; removable: (id: string) => boolean }> = [
-        { kind: 'live', roleId: settings.liveRoleId, desired: liveUserIds, removable: () => true },
+        { kind: 'live', roleId: settings.liveRoleId, desired: liveUserIds, removable: (id) => registered.has(id) },
       ];
       // Same role for both (misconfiguration flagged by diagnostics): live semantics win, no add/remove flapping.
       if (settings.options.autoStreamerRole && settings.streamerRoleId !== settings.liveRoleId) {
@@ -111,9 +156,8 @@ export class DiscordRoles implements RoleManager {
       let added = 0;
       let removed = 0;
       for (const target of active) {
-        const resolved = await this.resolveTarget(guild, target.roleId!, target.kind);
-        if (!resolved) continue;
-        const { role } = resolved;
+        const role = await this.resolveTarget(guild, target.roleId!, target.kind);
+        if (typeof role === 'string') continue;
         const holders = new Set([...members.byId.values()].filter((m) => m.roles.cache.has(role.id)).map((m) => m.id));
         // Without the full member list, cached role holders are the best view of who still has the role.
         if (!members.complete) for (const id of role.members.keys()) holders.add(id);
@@ -125,11 +169,11 @@ export class DiscordRoles implements RoleManager {
         });
         for (const userId of plan.add) {
           const member = members.byId.get(userId);
-          if (member && (await this.change(guild, role, member, true, 'مزامنة الرتب', target.kind))) added++;
+          if (member && (await this.change(guild, role, member, true, 'مزامنة الرتب', target.kind)) === 'applied') added++;
         }
         for (const userId of plan.remove) {
           const member = members.byId.get(userId) ?? guild.members.cache.get(userId);
-          if (member && (await this.change(guild, role, member, false, 'مزامنة الرتب', target.kind))) removed++;
+          if (member && (await this.change(guild, role, member, false, 'مزامنة الرتب', target.kind)) === 'applied') removed++;
         }
       }
       return { added, removed };
@@ -138,51 +182,83 @@ export class DiscordRoles implements RoleManager {
 
   // ───────────────────────────── internals ─────────────────────────────
 
-  private apply(guildId: string, userId: string, kind: RoleKind, want: boolean, reason: string): Promise<void> {
+  /**
+   * Applies one role change and reports what happened: 'transient' (Discord not ready, REST/network error) is
+   * worth retrying, 'config' needs an admin fix (missing role, hierarchy, permissions), 'noop' means nothing
+   * had to change (already in the wanted state, role not configured, member not in the guild).
+   */
+  private apply(guildId: string, userId: string, kind: RoleKind, want: boolean, reason: string): Promise<RoleChangeOutcome> {
     return this.queue
-      .run(guildId, async () => {
+      .run(guildId, async (): Promise<RoleChangeOutcome> => {
         const client = this.getClient();
         if (!client?.isReady()) {
-          log.warn({ guildId, userId, kind, want }, 'Discord not ready; role change skipped (reconcile will fix it)');
-          return;
+          log.warn({ guildId, userId, kind, want }, 'Discord not ready; role change skipped (caller may retry)');
+          return 'transient';
         }
-        if (!isSnowflake(userId)) return;
+        if (!isSnowflake(userId)) return 'noop';
         const settings = this.repos.settings.get(guildId);
         const roleId = kind === 'live' ? settings.liveRoleId : settings.streamerRoleId;
-        if (!roleId) return;
+        if (!roleId) return 'noop';
         const guild = client.guilds.cache.get(guildId);
         if (!guild) {
           this.warn(guildId, `not_in_guild`, 'البوت مو موجود في السيرفر، ما قدر يعدّل الرتب');
-          return;
+          return 'config';
         }
-        const target = await this.resolveTarget(guild, roleId, kind);
-        if (!target) return;
+        if (guild.available === false) {
+          log.warn({ guildId, userId, kind, want }, 'Guild unavailable (Discord outage); role change skipped');
+          return 'transient';
+        }
+        const role = await this.resolveTarget(guild, roleId, kind);
+        if (typeof role === 'string') return role;
         const member = await this.fetchMember(guild, userId);
-        if (!member) {
+        if (member === 'transient') return 'transient';
+        if (member === 'missing') {
           log.debug({ guildId, userId, kind }, 'Member not in guild; role change skipped');
-          return;
+          return 'noop';
         }
-        await this.change(guild, target.role, member, want, reason, kind);
+        return this.change(guild, role, member, want, reason, kind);
       })
-      .catch((err) => log.error({ err, guildId, userId, kind }, 'Role change failed unexpectedly'));
+      .catch((err): RoleChangeOutcome => {
+        log.error({ err, guildId, userId, kind }, 'Role change failed unexpectedly');
+        return 'transient';
+      });
   }
 
-  /** Validates the role and the bot's ability to manage it; warns (throttled) and returns null otherwise. */
-  private async resolveTarget(guild: Guild, roleId: string, kind: RoleKind): Promise<RoleTarget | null> {
+  /** Validates the role and the bot's ability to manage it; warns (throttled) and returns the problem otherwise. */
+  private async resolveTarget(guild: Guild, roleId: string, kind: RoleKind): Promise<Role | RoleProblem> {
     const label = ROLE_LABELS[kind];
     let role: Role | null = guild.roles.cache.get(roleId) ?? null;
-    if (!role && isSnowflake(roleId)) role = await guild.roles.fetch(roleId).catch(() => null);
+    if (!role && isSnowflake(roleId)) {
+      try {
+        role = await guild.roles.fetch(roleId);
+      } catch (err) {
+        // fetch() resolves null for an unknown role; anything thrown is a REST/network failure.
+        log.warn({ guildId: guild.id, roleId, err: describeDiscordError(err) }, 'Role fetch failed');
+        return classifyDiscordError(err) === 'unknown_role' ? 'config' : 'transient';
+      }
+    }
     if (!role) {
       this.warn(guild.id, `role_missing:${roleId}`, `رتبة ${label} المحددة (${roleId}) غير موجودة في السيرفر — يمكن انحذفت، حدّثها من الإعدادات`);
-      return null;
+      return 'config';
     }
+    const decision = await this.assignability(guild, role);
+    if (decision === 'transient') return 'transient';
+    if (!decision.ok) {
+      this.warn(guild.id, `role:${decision.code}:${role.id}`, decision.message);
+      return 'config';
+    }
+    return role;
+  }
+
+  /** Can the bot add/remove this role? 'transient' when the bot's own member could not be resolved. */
+  private async assignability(guild: Guild, role: Role): Promise<RoleAssignDecision | 'transient'> {
     const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
     if (!me) {
       log.warn({ guildId: guild.id }, 'Could not resolve the bot member');
-      return null;
+      return 'transient';
     }
     const highest = me.roles.highest;
-    const decision = decideRoleAssignability({
+    return decideRoleAssignability({
       guildId: guild.id,
       role: { id: role.id, name: role.name, position: role.position, managed: role.managed },
       bot: {
@@ -190,36 +266,38 @@ export class DiscordRoles implements RoleManager {
         highestRole: highest && highest.id !== guild.id ? { id: highest.id, position: highest.position } : null,
       },
     });
-    if (!decision.ok) {
-      this.warn(guild.id, `role:${decision.code}:${role.id}`, decision.message);
-      return null;
-    }
-    return { guild, role };
   }
 
-  /** Adds/removes the role; returns true when something changed. Never throws. */
-  private async change(guild: Guild, role: Role, member: GuildMember, want: boolean, reason: string, kind: RoleKind): Promise<boolean> {
-    if (member.roles.cache.has(role.id) === want) return false;
+  /** Adds/removes the role and reports the outcome ('applied' when something changed). Never throws. */
+  private async change(guild: Guild, role: Role, member: GuildMember, want: boolean, reason: string, kind: RoleKind): Promise<RoleChangeOutcome> {
+    if (member.roles.cache.has(role.id) === want) return 'noop';
     try {
       if (want) await member.roles.add(role, reason);
       else await member.roles.remove(role, reason);
     } catch (err) {
       switch (classifyDiscordError(err)) {
         case 'unknown_member':
-          return false;
+          return 'noop';
         case 'unknown_role':
           this.warn(guild.id, `role_missing:${role.id}`, `رتبة ${ROLE_LABELS[kind]} (${role.name}) انحذفت من السيرفر — حدّثها من الإعدادات`);
-          return false;
+          return 'config';
+        case 'unknown_channel':
+          // Unknown Guild: the bot is no longer in the server.
+          return 'config';
         case 'forbidden':
           this.warn(
             guild.id,
             `role_forbidden:${role.id}`,
             `ديسكورد رفض تعديل رتبة ${role.name} — تأكد إن عند البوت صلاحية Manage Roles وإن رتبة البوت فوق رتبة ${role.name}`,
           );
-          return false;
+          return 'config';
+        case 'invalid':
+          log.warn({ guildId: guild.id, userId: member.id, roleId: role.id, err: describeDiscordError(err) }, 'Role change rejected by Discord');
+          return 'config';
         default:
+          // Network error, 5xx after discord.js retries, timeout: worth retrying later.
           log.warn({ guildId: guild.id, userId: member.id, roleId: role.id, err: describeDiscordError(err) }, 'Role change failed');
-          return false;
+          return 'transient';
       }
     }
     this.audit.record({
@@ -229,17 +307,19 @@ export class DiscordRoles implements RoleManager {
       details: { userId: member.id, roleId: role.id, kind, reason },
       mirror: false,
     });
-    return true;
+    return 'applied';
   }
 
-  private async fetchMember(guild: Guild, userId: string): Promise<GuildMember | null> {
+  /** 'missing' = not in the guild (Unknown Member); 'transient' = the lookup itself failed. */
+  private async fetchMember(guild: Guild, userId: string): Promise<GuildMember | 'missing' | 'transient'> {
     const cached = guild.members.cache.get(userId);
     if (cached) return cached;
     try {
       return await guild.members.fetch(userId);
     } catch (err) {
-      if (classifyDiscordError(err) !== 'unknown_member') log.warn({ guildId: guild.id, userId, err: describeDiscordError(err) }, 'Member fetch failed');
-      return null;
+      if (classifyDiscordError(err) === 'unknown_member') return 'missing';
+      log.warn({ guildId: guild.id, userId, err: describeDiscordError(err) }, 'Member fetch failed');
+      return 'transient';
     }
   }
 
@@ -260,7 +340,7 @@ export class DiscordRoles implements RoleManager {
     const byId = new Map<string, GuildMember>();
     for (const userId of wanted) {
       const member = await this.fetchMember(guild, userId);
-      if (member) byId.set(userId, member);
+      if (typeof member !== 'string') byId.set(userId, member);
     }
     return { byId, complete: false };
   }

@@ -46,6 +46,8 @@ async function main(): Promise<void> {
   const monitor = new Monitor({ config, repos, providers, live: sessions, content, audit, events });
   const streamers = new StreamerService({ repos, audit, providers, discord, roles: discord, sessions, monitor });
   discord.attachServices({ streamers, sessions, repos, audit });
+  // Role changes may have failed while the gateway was away.
+  discord.onGatewayRecovered(() => void sessions.reconcileLiveRoles().catch((err) => logger.warn({ err }, 'Live role reconcile failed')));
 
   const ctx: AppContext = {
     config,

@@ -59,8 +59,10 @@ describe('DiscordService (no gateway)', () => {
   it('never throws from role changes or log() while offline', async () => {
     const { discord, repos } = service();
     repos.settings.update(GUILD, { liveRoleId: '666666666666666666', logChannelId: LIVE_CHANNEL });
-    await expect(discord.setLive(GUILD, '222222222222222222', true, 'test')).resolves.toBeUndefined();
-    await expect(discord.setStreamer(GUILD, '222222222222222222', true, 'test')).resolves.toBeUndefined();
+    // Offline is a transient failure: the caller retries (reconcile) instead of losing the change.
+    await expect(discord.setLive(GUILD, '222222222222222222', true, 'test')).resolves.toBe('transient');
+    await expect(discord.setStreamer(GUILD, '222222222222222222', true, 'test')).resolves.toBe('transient');
+    await expect(discord.removeRoleFrom(GUILD, '666666666666666666', ['222222222222222222'], 'test')).resolves.toBeUndefined();
     await expect(discord.log(GUILD, 'warn', 'x')).resolves.toBeUndefined();
     await expect(discord.reconcile(GUILD, new Set(), new Set())).rejects.toThrow('غير متصل');
     await discord.stop();
@@ -72,11 +74,14 @@ describe('DiscordService (no gateway)', () => {
     expect(result.problems.map((p) => p.code)).toEqual(['discord_not_ready']);
   });
 
-  it('returns null/false from the notifier while offline instead of throwing', async () => {
+  it('reports transient outcomes from the notifier while offline instead of throwing', async () => {
     const { discord } = service();
-    const view = sampleLiveView(settings({ liveChannelId: LIVE_CHANNEL }), T0);
+    const s = settings({ liveChannelId: LIVE_CHANNEL });
+    const view = sampleLiveView(s, T0);
+    const ref = { channelId: LIVE_CHANNEL, messageId: '999999999999999999' };
     await expect(discord.postLive(view)).resolves.toBeNull();
-    await expect(discord.updateLive({ channelId: LIVE_CHANNEL, messageId: '999999999999999999' }, view)).resolves.toBe(true);
+    await expect(discord.updateLive(ref, view)).resolves.toBe('transient');
+    await expect(discord.postSummary(ref, sampleSummaryView(s, T0))).resolves.toEqual({ status: 'transient', reason: 'not_ready' });
   });
 });
 

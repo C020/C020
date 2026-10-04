@@ -14,6 +14,8 @@ type TemplateKey = keyof Templates;
 const TEMPLATE_KEYS: TemplateKey[] = ['live', 'summary', 'content'];
 
 const ROLE_FIELDS = ['streamerRoleId', 'liveRoleId', 'pingRoleId'] as const;
+/** Roles the bot hands out and takes away by itself: changing them needs Manage Roles (see routes/settings.ts). */
+export const ASSIGNED_ROLE_FIELDS: ReadonlySet<string> = new Set(['streamerRoleId', 'liveRoleId']);
 const CHANNEL_FIELDS = ['liveChannelId', 'contentChannelId', 'logChannelId'] as const;
 type RoleField = (typeof ROLE_FIELDS)[number];
 type ChannelField = (typeof CHANNEL_FIELDS)[number];
@@ -173,6 +175,12 @@ export async function validateDiscordReferences(ctx: AppContext, guildId: string
         if (!role) throw new ValidationError('هذي الرتبة مو موجودة في السيرفر', field);
         if (role.managed && field !== 'pingRoleId') {
           throw new ValidationError(`الرتبة "${role.name}" تابعة لبوت أو تكامل، وديسكورد ما يسمح للبوت يعطيها لأحد`, field);
+        }
+        if (role.elevated && field !== 'pingRoleId') {
+          throw new ValidationError(
+            `الرتبة "${role.name}" فيها صلاحيات إدارية (مثل Administrator أو Manage Roles أو Ban Members)، والبوت يعطي ${SETTING_LABELS_AR[field]} ويشيلها تلقائياً، فأي ستريمر بياخذ هذي الصلاحيات. اختر رتبة بدون صلاحيات إدارية`,
+            field,
+          );
         }
       }
     }
