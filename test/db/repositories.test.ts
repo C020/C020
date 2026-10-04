@@ -192,6 +192,19 @@ describe('Repositories', () => {
     expect(repos.streamers.list('g1').map((s) => s.discordUserId)).toEqual(['1']);
   });
 
+  it('recovers from a failed COMMIT: no stuck transaction and later transactions still work', () => {
+    const db = repos.db;
+    db.exec('CREATE TABLE p (id INTEGER PRIMARY KEY); CREATE TABLE c (pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED);');
+    // A deferred foreign key violation makes COMMIT itself fail (SQLite keeps the transaction open).
+    expect(() => repos.tx(() => db.exec('INSERT INTO c VALUES (42)'))).toThrow(/FOREIGN KEY/);
+    expect(db.isTransaction).toBe(false);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM c').get()).toEqual({ n: 0 });
+
+    repos.tx(() => repos.streamers.create({ guildId: 'g1', discordUserId: '7', displayName: 'After' }));
+    expect(repos.streamers.getByDiscordId('g1', '7')?.displayName).toBe('After');
+    expect(db.isTransaction).toBe(false);
+  });
+
   it('web sessions expire', () => {
     const now = Date.now();
     repos.webSessions.create({ id: 'a', userId: 'u', username: 'n', avatarUrl: null, guilds: [], guildsRefreshedAt: new Date(now).toISOString(), accessToken: null, expiresAt: new Date(now - 1000).toISOString() });
