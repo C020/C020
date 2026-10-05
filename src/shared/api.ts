@@ -6,12 +6,24 @@
  * - All endpoints are under /api, JSON in/out, cookie-session auth (cookie "sb_session", httpOnly).
  * - Mutating requests (POST/PUT/PATCH/DELETE) must send header "x-csrf-token" equal to the value
  *   returned by GET /api/me (csrfToken). The server rejects missing/mismatching tokens with 403.
- * - Errors: non-2xx with body ApiError. `message` is user-facing Arabic text.
+ * - Errors: non-2xx with body ApiError. `message` is user-facing text (Arabic by default; English when the request
+ *   carries header "x-ui-lang: en" and the server has an English message for that error).
  * - Guild-scoped endpoints require the user to be in ADMIN_USER_IDS or to have Manage Server/Administrator
  *   in that guild, and the bot must be in the guild.
  */
 import type { ContentKind, LiveSnapshot, Platform } from '../core/types.js';
-import type { AuditEntry, GuildOptions, PingMode, SessionCategory, Templates, TemplateSpec } from '../db/models.js';
+import type {
+  ApplicationStatus,
+  AuditEntry,
+  GuildFeatures,
+  GuildFeaturesPatch,
+  GuildOptions,
+  LinkPlatform,
+  PingMode,
+  SessionCategory,
+  Templates,
+  TemplateSpec,
+} from '../db/models.js';
 
 export interface ApiError {
   error: string; // machine code, e.g. "unauthorized", "forbidden", "not_found", "validation", "csrf", "internal"
@@ -32,6 +44,17 @@ export interface MeResponse {
   bot: { id: string; username: string; avatarUrl: string | null; ready: boolean } | null;
   /** OAuth2 URL to invite the bot (with required permissions). */
   inviteUrl: string;
+  /** What the server can do (drives which v2 settings the dashboard shows as available). */
+  capabilities: Capabilities;
+}
+
+export interface Capabilities {
+  /** #15 — the bot logged in with the Presence intent. */
+  presenceIntent: boolean;
+  /** #11 — account linking available per platform (credentials + public URL configured). */
+  linking: Record<LinkPlatform, boolean>;
+  /** Kick VOD/clip auto-detection enabled on the server (KICK_UNOFFICIAL_CONTENT). */
+  kickAutoContent: boolean;
 }
 
 export interface GuildSummary {
@@ -68,7 +91,7 @@ export interface ProviderStatus {
 export interface GuildOverview {
   guild: GuildSummary;
   diagnostics: DiagnosticsDto;
-  counts: { streamers: number; accounts: number; liveNow: number; sessionsLast7d: number; contentLast7d: number };
+  counts: { streamers: number; accounts: number; liveNow: number; sessionsLast7d: number; contentLast7d: number; pendingApplications: number };
   liveNow: LiveNowItem[];
   recentSessions: SessionDto[];
   recentContent: ContentDto[];
@@ -131,10 +154,15 @@ export interface SettingsDto {
   contentKinds: ContentKind[];
   templates: Templates;
   options: GuildOptions;
+  /** Optional features (#1 notify role, #4 routing, #6 clips, #8 counter, #9 applications, #10 silent, #11 linking, #14 manual posts, #15 presence, #16 language). */
+  features: GuildFeatures;
   updatedAt: string;
 }
 
-export type SettingsUpdate = Partial<Omit<SettingsDto, 'guildId' | 'updatedAt' | 'options'>> & { options?: Partial<GuildOptions> };
+export type SettingsUpdate = Partial<Omit<SettingsDto, 'guildId' | 'updatedAt' | 'options' | 'features'>> & {
+  options?: Partial<GuildOptions>;
+  features?: GuildFeaturesPatch;
+};
 
 // ───────────── streamers ─────────────
 // GET    /api/guilds/:guildId/streamers                       → StreamerDto[]
@@ -171,6 +199,8 @@ export interface UpdateStreamerRequest {
   notes?: string | null;
   color?: number | null;
   enabled?: boolean;
+  /** #5 — per-streamer template overrides (replaces the whole object; an empty spec for a type = no override). */
+  templates?: Templates;
 }
 
 export interface UpdateAccountRequest {
@@ -194,6 +224,8 @@ export interface AccountDto {
   snapshot: LiveSnapshot | null;
   lastCheckedAt: string | null;
   lastError: string | null;
+  /** #11 — the member linked this exact platform account officially. */
+  verified: boolean;
 }
 
 export interface StreamerDto {
@@ -203,10 +235,14 @@ export interface StreamerDto {
   avatarUrl: string | null;
   notes: string | null;
   color: number | null;
+  /** #5 — per-streamer template overrides. */
+  templates: Templates;
   enabled: boolean;
   isLive: boolean;
   /** Whether the member is still in the guild (null = unknown). */
   inGuild: boolean | null;
+  /** #11 — official account links of this member (verified ownership). */
+  links: Array<{ platform: LinkPlatform; platformUserId: string; login: string | null; linkedAt: string }>;
   accounts: AccountDto[];
   stats: { sessions30d: number; hours30d: number; peakViewers30d: number };
   createdAt: string;
@@ -278,6 +314,8 @@ export interface TestRequest {
 export interface PreviewRequest {
   type: 'live' | 'summary' | 'content';
   template?: TemplateSpec;
+  /** #5 — preview with this streamer's name/avatar/color and saved overrides (template = the edited override). */
+  streamerId?: number;
 }
 
 /** Discord-like message JSON for the dashboard's live preview renderer. */
@@ -343,3 +381,110 @@ export const TEMPLATE_VARIABLES: Record<'live' | 'summary' | 'content', Array<{ 
     { key: 'user', description: 'اسم العضو في ديسكورد' },
   ],
 };
+
+// ───────────── v2: applications (#9) ─────────────
+// GET  /api/guilds/:guildId/applications?status=&limit=&beforeId=   → ApplicationDto[]
+// GET  /api/guilds/:guildId/applications/:id                        → ApplicationDto
+// POST /api/guilds/:guildId/applications/:id/approve  body: ApproveApplicationRequest → ApproveApplicationResponse
+// POST /api/guilds/:guildId/applications/:id/reject   body: { note?: string | null } → ApplicationDto
+export interface ApplicationDto {
+  id: number;
+  userId: string;
+  username: string;
+  avatarUrl: string | null;
+  /** Member still in the guild (null = unknown). */
+  inGuild: boolean | null;
+  accounts: Array<{ platform: Platform; input: string }>;
+  note: string | null;
+  status: ApplicationStatus;
+  reviewer: { id: string; username: string | null } | null;
+  reviewNote: string | null;
+  streamerId: number | null;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface ApproveApplicationRequest {
+  note?: string | null;
+  /** Optional edited accounts (defaults to the applicant's inputs). */
+  accounts?: AccountInput[];
+}
+
+export interface ApproveApplicationResponse {
+  application: ApplicationDto;
+  streamer: StreamerDto;
+  skipped: Array<{ platform: Platform; input: string; reason: string }>;
+}
+
+// ───────────── v2: panels (#1 notify role, #9 apply) ─────────────
+// POST /api/guilds/:guildId/panels/:kind   (kind = notify | apply) → { ok: true, messageUrl: string }
+
+// ───────────── v2: manual posts (#14) ─────────────
+// POST /api/guilds/:guildId/manual-posts/inspect  body: { url } → ManualPostPreviewDto
+// POST /api/guilds/:guildId/manual-posts          body: ManualPostRequest → { ok: true, messageUrl: string | null }
+export interface ManualPostPreviewDto {
+  platform: Platform;
+  kind: ContentKind;
+  contentId: string;
+  url: string;
+  title: string | null;
+  thumbnailUrl: string | null;
+  streamer: { id: number; displayName: string } | null;
+  channelId: string | null;
+  alreadyPosted: boolean;
+}
+
+export interface ManualPostRequest {
+  url: string;
+  title?: string | null;
+  thumbnailUrl?: string | null;
+  streamerId?: number | null;
+  kind?: ContentKind | null;
+}
+
+// ───────────── v2: clips digest (#6) ─────────────
+// POST /api/guilds/:guildId/digest/post-now → { ok: true, messageUrl: string | null }
+
+// ───────────── v2: statistics (#13) ─────────────
+// GET /api/guilds/:guildId/sessions/:sessionId          → SessionDetailDto
+// GET /api/guilds/:guildId/streamers/:id/stats?days=30  → StreamerStatsDto   (days: 7 | 30 | 90 | 365)
+export interface ViewerSampleDto {
+  at: string;
+  total: number | null;
+  platforms: Partial<Record<Platform, number | null>>;
+  category: string | null;
+}
+
+export interface SessionDetailDto extends SessionDto {
+  samples: ViewerSampleDto[];
+  segments: Array<{
+    platform: Platform;
+    channelId: number;
+    displayName: string;
+    url: string;
+    startedAt: string;
+    endedAt: string | null;
+    peakViewers: number;
+    vodUrl: string | null;
+  }>;
+}
+
+export interface StreamerStatsDto {
+  streamer: StreamerSummary;
+  days: number;
+  totals: { sessions: number; seconds: number; peakViewers: number; avgViewers: number | null; contentPosts: number };
+  daily: Array<{ date: string; seconds: number; sessions: number; peakViewers: number }>;
+  platforms: Array<{ platform: Platform; seconds: number; sessions: number; peakViewers: number }>;
+  categories: Array<{ name: string; seconds: number }>;
+  /** Seconds live per local hour of day (24 buckets). */
+  hours: number[];
+  recentSessions: SessionDto[];
+}
+
+// ───────────── v2: account links (#11) ─────────────
+// DELETE /api/guilds/:guildId/streamers/:id/links/:platform → StreamerDto   (admin removes a member's link)
+// GET    /link/start?t=<signed>          → 302 to the platform's OAuth consent screen
+// GET    /link/callback/:platform        → small HTML result page (guild language)
+
+// ───────────── realtime additions ─────────────
+// events: "application" (data: { applicationId, status })

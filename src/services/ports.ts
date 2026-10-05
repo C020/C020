@@ -7,6 +7,7 @@ import type {
   AuditLevel,
   Channel,
   GuildSettings,
+  StreamerApplication,
   LiveSegment,
   LiveSession,
   SessionCategory,
@@ -63,6 +64,35 @@ export interface MessageRef {
   messageId: string;
 }
 
+/** #6 — daily clip digest for a guild. */
+export interface DigestView {
+  guildId: string;
+  settings: GuildSettings;
+  /** Clips, best first (by views), at most features.clips.digestMax. */
+  entries: Array<{ streamer: Streamer | null; channel: Pick<Channel, 'id' | 'platform' | 'displayName' | 'handle' | 'url' | 'avatarUrl'>; item: StoredContentItem & { viewCount?: number | null } }>;
+  /** Local date label of the digest (YYYY-MM-DD in the guild timezone). */
+  date: string;
+  /** Total clips queued (may exceed entries when capped). */
+  total: number;
+}
+
+/** #15 — a stream detected only through the member's Discord "Streaming" presence. */
+export interface PresenceLiveView {
+  guildId: string;
+  settings: GuildSettings;
+  userId: string;
+  /** Display name of the member (or registered streamer name). */
+  displayName: string;
+  avatarUrl: string | null;
+  streamer: Streamer | null;
+  url: string | null;
+  platform: Platform | null;
+  title: string | null;
+  game: string | null;
+  startedAt: string;
+  endedAt: string | null;
+}
+
 /**
  * Outcome of editing an existing live message.
  * - ok:        edited (or nothing to change)
@@ -100,6 +130,12 @@ export interface Notifier {
   postSummary(ref: MessageRef | null, view: SummaryView): Promise<SummaryOutcome>;
   /** Post a new-content notification. */
   postContent(view: ContentView): Promise<MessageRef | null>;
+  /** #6 — post the daily clip digest. Returns null when nothing could be posted. */
+  postDigest(view: DigestView): Promise<MessageRef | null>;
+  /** #15 — simple live notification for a presence-only stream (no platform account tracked). */
+  postPresenceLive(view: PresenceLiveView): Promise<MessageRef | null>;
+  /** #15 — turn a presence notification into a short "ended" card. Returns false when the message is gone. */
+  endPresenceLive(ref: MessageRef, view: PresenceLiveView): Promise<boolean>;
   /** Mirror an important event to the guild's log channel (no-op when not configured). */
   log(guildId: string, level: AuditLevel, message: string): Promise<void>;
 }
@@ -173,6 +209,24 @@ export interface DiscordGuildInfo {
   memberCount: number;
 }
 
+/** Outcome of renaming a channel (#8 counter). Discord allows ~2 renames per 10 minutes per channel. */
+export type RenameOutcome = 'ok' | 'unchanged' | 'rate_limited' | 'forbidden' | 'missing' | 'error';
+
+/** Discord write actions used by the v2 services (implemented by the Discord layer). Never throw. */
+export interface DiscordActions {
+  /** #8 — rename a channel (voice/text). `retryAfterMs` is set when rate limited. */
+  renameChannel(guildId: string, channelId: string, name: string): Promise<{ outcome: RenameOutcome; retryAfterMs?: number }>;
+  /** Send a direct message (e.g. application decision). Returns false when DMs are closed or it failed. */
+  sendDirectMessage(userId: string, message: { content: string; embedTitle?: string; embedDescription?: string; color?: number }): Promise<boolean>;
+  /** #9 — post/refresh the reviewers' message for an application (with approve/reject buttons). Returns its ref or null. */
+  upsertApplicationReview(application: StreamerApplication, settings: GuildSettings): Promise<MessageRef | null>;
+  /**
+   * #15 — members of a guild currently showing a Discord "Streaming" activity, or null when the Presence intent is
+   * not available (then presence detection is inactive).
+   */
+  streamingPresences(guildId: string): Promise<Map<string, { url: string | null; platform: Platform | null; title: string | null; game: string | null }> | null>;
+}
+
 /** Read-only Discord lookups used by the web dashboard and the services. */
 export interface DiscordGateway {
   isReady(): boolean;
@@ -199,6 +253,12 @@ export interface LiveEventHandler {
 export interface ContentEventHandler {
   /** A content item never seen before (only after the channel's initial seeding). */
   onNewContent(channel: Channel, item: ContentItem, stored: StoredContentItem): Promise<void>;
+  /**
+   * #6 — an already stored item that has not been announced yet was seen again with fresh data (e.g. a young clip
+   * whose view count grew past the guild's minimum). Called by the monitor for unannounced clips first seen within
+   * the last 24h. Implementations must be idempotent (per-guild dedupe).
+   */
+  onContentUpdate?(channel: Channel, item: ContentItem, stored: StoredContentItem): Promise<void>;
 }
 
 /** What services need from the monitor (to react to dashboard changes). */

@@ -29,6 +29,7 @@ export function streamer(patch: Partial<Streamer> = {}): Streamer {
     displayName: 'أبو فهد',
     notes: null,
     color: null,
+    templates: {},
     enabled: true,
     createdAt: new Date(T0).toISOString(),
     updatedAt: new Date(T0).toISOString(),

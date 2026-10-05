@@ -1,5 +1,8 @@
 import type { ContentKind, LiveSnapshot, Platform } from '../core/types.js';
 import { CONTENT_KINDS, PLATFORMS } from '../core/types.js';
+import { DEFAULT_GUILD_FEATURES, type GuildFeatures, type GuildFeaturesPatch } from './features.js';
+
+export * from './features.js';
 
 export type PingMode = 'none' | 'everyone' | 'here' | 'role';
 
@@ -60,12 +63,15 @@ export interface GuildSettings {
   contentKinds: ContentKind[];
   templates: Templates;
   options: GuildOptions;
+  /** Optional features (#1, #4, #6, #8–#11, #14–#16). */
+  features: GuildFeatures;
   createdAt: string;
   updatedAt: string;
 }
 
-export type GuildSettingsPatch = Partial<Omit<GuildSettings, 'guildId' | 'createdAt' | 'updatedAt' | 'options'>> & {
+export type GuildSettingsPatch = Partial<Omit<GuildSettings, 'guildId' | 'createdAt' | 'updatedAt' | 'options' | 'features'>> & {
   options?: Partial<GuildOptions>;
+  features?: GuildFeaturesPatch;
 };
 
 export function defaultGuildSettings(guildId: string, now: string): GuildSettings {
@@ -82,6 +88,7 @@ export function defaultGuildSettings(guildId: string, now: string): GuildSetting
     contentKinds: [...CONTENT_KINDS],
     templates: {},
     options: { ...DEFAULT_GUILD_OPTIONS },
+    features: structuredClone(DEFAULT_GUILD_FEATURES),
     createdAt: now,
     updatedAt: now,
   };
@@ -93,7 +100,10 @@ export interface Streamer {
   discordUserId: string;
   displayName: string;
   notes: string | null;
+  /** Embed color for this streamer's notifications (overrides the platform color, not a template color). */
   color: number | null;
+  /** #5 — per-streamer message template overrides (field by field over the guild templates). */
+  templates: Templates;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -238,4 +248,99 @@ export interface WebSession {
   accessToken: string | null;
   createdAt: string;
   expiresAt: string;
+}
+
+// ───────────── v2 features ─────────────
+
+/** #13 — viewer sample of a live session (one per minute at most). */
+export interface LiveSample {
+  id: number;
+  sessionId: number;
+  at: string;
+  /** Sum over live platforms; null when no platform reported viewers. */
+  totalViewers: number | null;
+  /** Viewers per live platform at that moment (null = hidden/unknown). */
+  platforms: Partial<Record<Platform, number | null>>;
+  /** Primary platform category at that moment. */
+  category: string | null;
+}
+
+export type ApplicationStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+/** #9 — a member's request to be registered as a streamer. */
+export interface StreamerApplication {
+  id: number;
+  guildId: string;
+  userId: string;
+  username: string;
+  /** Raw inputs the member typed per platform. */
+  accounts: Array<{ platform: Platform; input: string }>;
+  note: string | null;
+  status: ApplicationStatus;
+  reviewerId: string | null;
+  reviewNote: string | null;
+  /** Streamer created when approved. */
+  streamerId: number | null;
+  /** Review message in the reviewers' channel (so it can be edited after a decision). */
+  reviewChannelId: string | null;
+  reviewMessageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+}
+
+export type LinkPlatform = 'twitch' | 'tiktok';
+
+/** #11 — an official OAuth link between a Discord user and a platform account. */
+export interface AccountLink {
+  id: number;
+  discordUserId: string;
+  platform: LinkPlatform;
+  platformUserId: string;
+  /** Login / username on the platform (TikTok: unique handle when the profile scope was granted). */
+  platformLogin: string | null;
+  displayName: string | null;
+  /** Encrypted tokens (TikTok keeps them to read the video list officially; Twitch discards them). */
+  accessTokenEnc: string | null;
+  refreshTokenEnc: string | null;
+  scopes: string[];
+  accessExpiresAt: string | null;
+  refreshExpiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PanelKind = 'notify' | 'apply';
+
+/** Message with interactive buttons posted by the bot (notification-role toggle, apply button). */
+export interface PanelMessage {
+  guildId: string;
+  kind: PanelKind;
+  channelId: string;
+  messageId: string;
+  updatedAt: string;
+}
+
+/** #15 — a live role given because of a Discord "Streaming" presence (removed when the presence ends). */
+export interface PresenceGrant {
+  guildId: string;
+  userId: string;
+  startedAt: string;
+  url: string | null;
+  platform: Platform | null;
+  title: string | null;
+  game: string | null;
+  /** Presence-only live notification, when `presence.notify` is on. */
+  messageChannelId: string | null;
+  messageId: string | null;
+}
+
+/** #6 — clip waiting for the guild's daily digest. */
+export interface DigestEntry {
+  id: number;
+  guildId: string;
+  contentItemId: number;
+  streamerId: number | null;
+  queuedAt: string;
+  postedAt: string | null;
 }

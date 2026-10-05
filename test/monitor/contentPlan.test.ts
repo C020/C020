@@ -9,7 +9,7 @@ const now = '2026-10-03T12:00:00.000Z';
 function sub(guildId: string, over: { notifyContent?: boolean; contentKinds?: ContentKind[] | null; enabled?: boolean } = {}): ChannelSubscriber {
   return {
     guildId,
-    streamer: { id: 1, guildId, discordUserId: '1', displayName: 'S', notes: null, color: null, enabled: over.enabled ?? true, createdAt: now, updatedAt: now },
+    streamer: { id: 1, guildId, discordUserId: '1', displayName: 'S', notes: null, color: null, templates: {}, enabled: over.enabled ?? true, createdAt: now, updatedAt: now },
     account: { id: 1, streamerId: 1, channelId: 1, notifyLive: true, notifyContent: over.notifyContent ?? true, contentKinds: over.contentKinds ?? null, createdAt: now },
   };
 }

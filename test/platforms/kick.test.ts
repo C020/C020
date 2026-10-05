@@ -69,7 +69,7 @@ const API = 'https://api.kick.com/public/v1';
 const TOKEN = 'https://id.kick.com/oauth/token';
 const T0 = Date.parse('2026-10-03T12:00:00Z');
 
-// Most tests exercise the (opt-in) unofficial content path; the default-off behaviour has its own test.
+// Most tests exercise the unofficial content path (on by default); the switched-off behaviour has its own test.
 const baseEnv = { DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: 'c', KICK_CLIENT_ID: 'kick-id', KICK_CLIENT_SECRET: 'kick-secret', KICK_UNOFFICIAL_CONTENT: 'true' };
 const logger = pino({ level: 'silent' });
 
@@ -525,16 +525,16 @@ const challengePage = () =>
     headers: { 'content-type': 'text/html; charset=UTF-8', 'cf-mitigated': 'challenge' },
   });
 
-describe('unofficial content is opt-in', () => {
+describe('unofficial content can be turned off', () => {
   beforeEach(() => tokenRoute());
 
-  it('does not touch kick.com website endpoints unless KICK_UNOFFICIAL_CONTENT is enabled', async () => {
+  it('does not touch kick.com website endpoints when KICK_UNOFFICIAL_CONTENT=false', async () => {
     let websiteCalls = 0;
     server.on('GET', VIDEOS, () => {
       websiteCalls++;
       return json(videoList());
     });
-    const provider = makeProvider({ env: { KICK_UNOFFICIAL_CONTENT: '' } });
+    const provider = makeProvider({ env: { KICK_UNOFFICIAL_CONTENT: 'false' } });
     expect(provider.capabilities.content).toEqual([]);
     expect(await provider.fetchRecentContent(channel('668', 'xqc'), ['vod', 'clip'])).toEqual([]);
     expect(await provider.findVodUrl(channel('668', 'xqc'), 'stream-1', '2026-10-02T18:00:00Z')).toBe('https://kick.com/xqc/videos');

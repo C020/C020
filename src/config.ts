@@ -47,6 +47,11 @@ const EnvSchema = z.object({
   SESSION_SECRET: optionalString,
   /** Discord user ids that can always access the dashboard (besides guild managers). */
   ADMIN_USER_IDS: csv,
+  /**
+   * #15 — request the privileged GUILD_PRESENCES intent (enable "Presence Intent" in the Developer Portal first,
+   * otherwise login fails). Needed for Discord "Streaming" status detection.
+   */
+  DISCORD_PRESENCE_INTENT: bool(false),
 
   // Storage
   DATABASE_PATH: z.string().default('./data/bot.db'),
@@ -61,16 +66,20 @@ const EnvSchema = z.object({
   KICK_CLIENT_ID: optionalString,
   KICK_CLIENT_SECRET: optionalString,
   /**
-   * Kick has no official VOD/clip API. When true, the bot tries Kick's unofficial website endpoints
-   * (plain requests, no Cloudflare circumvention). Off by default: Kick's ToS forbid scraping and a
-   * violation could get the developer app (which live detection depends on) suspended.
+   * Kick has no official VOD/clip API. When true (the default, chosen by the server owner), the bot reads Kick's
+   * public website endpoints (plain requests, no Cloudflare circumvention, auto-pauses when blocked). Set to false
+   * to rely on manual posting only: Kick's ToS forbid scraping and a violation could affect the developer app.
    */
-  KICK_UNOFFICIAL_CONTENT: bool(false),
+  KICK_UNOFFICIAL_CONTENT: bool(true),
 
   // YouTube
   YOUTUBE_API_KEY: optionalString,
   /** Optional secret for verifying YouTube WebSub (PubSubHubbub) pushes. Enables WebSub when PUBLIC_URL is set. */
   YOUTUBE_WEBSUB_SECRET: optionalString,
+
+  // TikTok official app (optional, #11 account linking: Login Kit + Display API)
+  TIKTOK_CLIENT_KEY: optionalString,
+  TIKTOK_CLIENT_SECRET: optionalString,
 
   // TikTok (unofficial)
   /** Optional Euler Stream API key used by tiktok-live-connector style signing; improves TikTok reliability. */

@@ -81,6 +81,8 @@ export interface ContentItem {
    * YouTube: the same video id as the live broadcast). Lets us skip VODs of streams we already announced.
    */
   relatedStreamId?: string | null;
+  /** Clips: whether the platform marks the clip as featured (Twitch). undefined/null = platform doesn't report it. */
+  featured?: boolean | null;
 }
 
 export function offlineSnapshot(channel: Pick<ChannelRef, 'platform' | 'platformId'>, url: string): LiveSnapshot {

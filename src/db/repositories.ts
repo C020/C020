@@ -2,8 +2,19 @@ import type { SQLInputValue } from 'node:sqlite';
 import type { ContentItem, ContentKind, LiveSnapshot, Platform, ResolvedChannel } from '../core/types.js';
 import type { KeyValueStore } from '../platforms/types.js';
 import { type Db, nowIso, parseJson, transaction } from './database.js';
+import { mergeFeatures, normalizeFeatures } from './features.js';
 import {
+  type AccountLink,
   type AccountWithChannel,
+  type ApplicationStatus,
+  type DigestEntry,
+  type LinkPlatform,
+  type LiveSample,
+  type PanelKind,
+  type PanelMessage,
+  type PresenceGrant,
+  type StreamerApplication,
+  type Templates,
   type AuditEntry,
   type AuditLevel,
   type Channel,
@@ -44,6 +55,7 @@ function mapSettings(r: Row): GuildSettings {
     contentKinds: parseJson<ContentKind[]>(s(r.content_kinds), []),
     templates: parseJson(s(r.templates), {}),
     options: { ...DEFAULT_GUILD_OPTIONS, ...parseJson(s(r.options), {}) },
+    features: normalizeFeatures(parseJson(s(r.features), {})),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -57,6 +69,7 @@ function mapStreamer(r: Row): Streamer {
     displayName: String(r.display_name),
     notes: s(r.notes),
     color: r.color == null ? null : n(r.color),
+    templates: parseJson<Templates>(s(r.templates), {}),
     enabled: b(r.enabled),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
@@ -210,14 +223,15 @@ export class SettingsRepo {
     const cur = this.get(guildId);
     const next: GuildSettings = {
       ...cur,
-      ...Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && k !== 'options')),
+      ...Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && k !== 'options' && k !== 'features')),
       options: { ...cur.options, ...(patch.options ?? {}) },
+      features: mergeFeatures(cur.features, patch.features),
       updatedAt: nowIso(),
     } as GuildSettings;
     this.db
       .prepare(
         `UPDATE guild_settings SET streamer_role_id=?, live_role_id=?, live_channel_id=?, content_channel_id=?, log_channel_id=?,
-           ping_mode=?, ping_role_id=?, platforms_enabled=?, content_kinds=?, templates=?, options=?, updated_at=? WHERE guild_id=?`,
+           ping_mode=?, ping_role_id=?, platforms_enabled=?, content_kinds=?, templates=?, options=?, features=?, updated_at=? WHERE guild_id=?`,
       )
       .run(
         next.streamerRoleId,
@@ -231,6 +245,7 @@ export class SettingsRepo {
         JSON.stringify(next.contentKinds),
         JSON.stringify(next.templates),
         JSON.stringify(next.options),
+        JSON.stringify(next.features),
         next.updatedAt,
         guildId,
       );
@@ -269,13 +284,13 @@ export class StreamerRepo {
     return this.get(n(res.lastInsertRowid))!;
   }
 
-  update(id: number, patch: Partial<Pick<Streamer, 'displayName' | 'notes' | 'color' | 'enabled'>>): Streamer | null {
+  update(id: number, patch: Partial<Pick<Streamer, 'displayName' | 'notes' | 'color' | 'enabled' | 'templates'>>): Streamer | null {
     const cur = this.get(id);
     if (!cur) return null;
     const next = { ...cur, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } as Streamer;
     this.db
-      .prepare('UPDATE streamers SET display_name=?, notes=?, color=?, enabled=?, updated_at=? WHERE id=?')
-      .run(next.displayName, next.notes, next.color, next.enabled ? 1 : 0, nowIso(), id);
+      .prepare('UPDATE streamers SET display_name=?, notes=?, color=?, enabled=?, templates=?, updated_at=? WHERE id=?')
+      .run(next.displayName, next.notes, next.color, next.enabled ? 1 : 0, JSON.stringify(next.templates ?? {}), nowIso(), id);
     return this.get(id);
   }
 
@@ -719,6 +734,324 @@ export class KvRepo implements KeyValueStore {
   }
 }
 
+
+// ───────────── v2 feature repositories ─────────────
+
+function mapSample(r: Row): LiveSample {
+  return {
+    id: n(r.id),
+    sessionId: n(r.session_id),
+    at: String(r.at),
+    totalViewers: r.total_viewers == null ? null : n(r.total_viewers),
+    platforms: parseJson(s(r.platforms), {}),
+    category: s(r.category),
+  };
+}
+
+/** #13 — viewer samples per session. */
+export class SampleRepo {
+  constructor(private readonly db: Db) {}
+
+  add(input: Omit<LiveSample, 'id'>): void {
+    this.db
+      .prepare('INSERT INTO live_samples (session_id, at, total_viewers, platforms, category) VALUES (?, ?, ?, ?, ?)')
+      .run(input.sessionId, input.at, input.totalViewers, JSON.stringify(input.platforms ?? {}), input.category);
+  }
+
+  last(sessionId: number): LiveSample | null {
+    const r = this.db.prepare('SELECT * FROM live_samples WHERE session_id = ? ORDER BY at DESC, id DESC LIMIT 1').get(sessionId) as Row | undefined;
+    return r ? mapSample(r) : null;
+  }
+
+  forSession(sessionId: number): LiveSample[] {
+    return (this.db.prepare('SELECT * FROM live_samples WHERE session_id = ? ORDER BY at, id').all(sessionId) as Row[]).map(mapSample);
+  }
+
+  prune(olderThanDays = 180): number {
+    const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+    return n(this.db.prepare('DELETE FROM live_samples WHERE at < ?').run(cutoff).changes);
+  }
+}
+
+function mapApplication(r: Row): StreamerApplication {
+  return {
+    id: n(r.id),
+    guildId: String(r.guild_id),
+    userId: String(r.user_id),
+    username: String(r.username),
+    accounts: parseJson(s(r.accounts), []),
+    note: s(r.note),
+    status: String(r.status) as ApplicationStatus,
+    reviewerId: s(r.reviewer_id),
+    reviewNote: s(r.review_note),
+    streamerId: r.streamer_id == null ? null : n(r.streamer_id),
+    reviewChannelId: s(r.review_channel_id),
+    reviewMessageId: s(r.review_message_id),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+    decidedAt: s(r.decided_at),
+  };
+}
+
+/** #9 — streamer applications. */
+export class ApplicationRepo {
+  constructor(private readonly db: Db) {}
+
+  get(id: number): StreamerApplication | null {
+    const r = this.db.prepare('SELECT * FROM applications WHERE id = ?').get(id) as Row | undefined;
+    return r ? mapApplication(r) : null;
+  }
+
+  pendingFor(guildId: string, userId: string): StreamerApplication | null {
+    const r = this.db.prepare("SELECT * FROM applications WHERE guild_id = ? AND user_id = ? AND status = 'pending'").get(guildId, userId) as Row | undefined;
+    return r ? mapApplication(r) : null;
+  }
+
+  list(guildId: string, opts: { status?: ApplicationStatus; limit?: number; beforeId?: number } = {}): StreamerApplication[] {
+    const where = ['guild_id = ?'];
+    const params: SQLInputValue[] = [guildId];
+    if (opts.status) {
+      where.push('status = ?');
+      params.push(opts.status);
+    }
+    if (opts.beforeId) {
+      where.push('id < ?');
+      params.push(opts.beforeId);
+    }
+    params.push(Math.min(opts.limit ?? 50, 200));
+    return (this.db.prepare(`SELECT * FROM applications WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...params) as Row[]).map(mapApplication);
+  }
+
+  countPending(guildId: string): number {
+    return n((this.db.prepare("SELECT COUNT(*) AS c FROM applications WHERE guild_id = ? AND status = 'pending'").get(guildId) as Row).c);
+  }
+
+  /** Throws a UNIQUE constraint error when the member already has a pending application. */
+  create(input: { guildId: string; userId: string; username: string; accounts: StreamerApplication['accounts']; note: string | null }): StreamerApplication {
+    const now = nowIso();
+    const res = this.db
+      .prepare('INSERT INTO applications (guild_id, user_id, username, accounts, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, \'pending\', ?, ?)')
+      .run(input.guildId, input.userId, input.username, JSON.stringify(input.accounts), input.note, now, now);
+    return this.get(n(res.lastInsertRowid))!;
+  }
+
+  update(
+    id: number,
+    patch: Partial<Pick<StreamerApplication, 'status' | 'reviewerId' | 'reviewNote' | 'streamerId' | 'reviewChannelId' | 'reviewMessageId' | 'decidedAt'>>,
+  ): StreamerApplication | null {
+    const cur = this.get(id);
+    if (!cur) return null;
+    const next = { ...cur, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } as StreamerApplication;
+    this.db
+      .prepare(
+        `UPDATE applications SET status=?, reviewer_id=?, review_note=?, streamer_id=?, review_channel_id=?, review_message_id=?, decided_at=?, updated_at=?
+         WHERE id=?`,
+      )
+      .run(next.status, next.reviewerId, next.reviewNote, next.streamerId, next.reviewChannelId, next.reviewMessageId, next.decidedAt, nowIso(), id);
+    return this.get(id);
+  }
+}
+
+function mapLink(r: Row): AccountLink {
+  return {
+    id: n(r.id),
+    discordUserId: String(r.discord_user_id),
+    platform: String(r.platform) as LinkPlatform,
+    platformUserId: String(r.platform_user_id),
+    platformLogin: s(r.platform_login),
+    displayName: s(r.display_name),
+    accessTokenEnc: s(r.access_token_enc),
+    refreshTokenEnc: s(r.refresh_token_enc),
+    scopes: parseJson<string[]>(s(r.scopes), []),
+    accessExpiresAt: s(r.access_expires_at),
+    refreshExpiresAt: s(r.refresh_expires_at),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+/** #11 — official account links. */
+export class LinkRepo {
+  constructor(private readonly db: Db) {}
+
+  get(discordUserId: string, platform: LinkPlatform): AccountLink | null {
+    const r = this.db.prepare('SELECT * FROM account_links WHERE discord_user_id = ? AND platform = ?').get(discordUserId, platform) as Row | undefined;
+    return r ? mapLink(r) : null;
+  }
+
+  forUser(discordUserId: string): AccountLink[] {
+    return (this.db.prepare('SELECT * FROM account_links WHERE discord_user_id = ? ORDER BY platform').all(discordUserId) as Row[]).map(mapLink);
+  }
+
+  byPlatformUser(platform: LinkPlatform, platformUserId: string): AccountLink | null {
+    const r = this.db.prepare('SELECT * FROM account_links WHERE platform = ? AND platform_user_id = ?').get(platform, platformUserId) as Row | undefined;
+    return r ? mapLink(r) : null;
+  }
+
+  /** Finds a link by platform login/handle (case-insensitive), e.g. a TikTok handle. */
+  byPlatformLogin(platform: LinkPlatform, login: string): AccountLink | null {
+    const r = this.db.prepare('SELECT * FROM account_links WHERE platform = ? AND lower(platform_login) = lower(?)').get(platform, login) as Row | undefined;
+    return r ? mapLink(r) : null;
+  }
+
+  upsert(input: Omit<AccountLink, 'id' | 'createdAt' | 'updatedAt'>): AccountLink {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO account_links (discord_user_id, platform, platform_user_id, platform_login, display_name, access_token_enc, refresh_token_enc, scopes,
+           access_expires_at, refresh_expires_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(discord_user_id, platform) DO UPDATE SET platform_user_id=excluded.platform_user_id, platform_login=excluded.platform_login,
+           display_name=excluded.display_name, access_token_enc=excluded.access_token_enc, refresh_token_enc=excluded.refresh_token_enc,
+           scopes=excluded.scopes, access_expires_at=excluded.access_expires_at, refresh_expires_at=excluded.refresh_expires_at, updated_at=excluded.updated_at`,
+      )
+      .run(
+        input.discordUserId,
+        input.platform,
+        input.platformUserId,
+        input.platformLogin,
+        input.displayName,
+        input.accessTokenEnc,
+        input.refreshTokenEnc,
+        JSON.stringify(input.scopes ?? []),
+        input.accessExpiresAt,
+        input.refreshExpiresAt,
+        now,
+        now,
+      );
+    return this.get(input.discordUserId, input.platform)!;
+  }
+
+  updateTokens(id: number, tokens: { accessTokenEnc: string | null; refreshTokenEnc: string | null; accessExpiresAt: string | null; refreshExpiresAt: string | null }): void {
+    this.db
+      .prepare('UPDATE account_links SET access_token_enc=?, refresh_token_enc=?, access_expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?')
+      .run(tokens.accessTokenEnc, tokens.refreshTokenEnc, tokens.accessExpiresAt, tokens.refreshExpiresAt, nowIso(), id);
+  }
+
+  delete(discordUserId: string, platform: LinkPlatform): boolean {
+    return n(this.db.prepare('DELETE FROM account_links WHERE discord_user_id = ? AND platform = ?').run(discordUserId, platform).changes) > 0;
+  }
+}
+
+/** Interactive panels (notification-role toggle, apply button). */
+export class PanelRepo {
+  constructor(private readonly db: Db) {}
+
+  get(guildId: string, kind: PanelKind): PanelMessage | null {
+    const r = this.db.prepare('SELECT * FROM panels WHERE guild_id = ? AND kind = ?').get(guildId, kind) as Row | undefined;
+    return r ? { guildId: String(r.guild_id), kind: String(r.kind) as PanelKind, channelId: String(r.channel_id), messageId: String(r.message_id), updatedAt: String(r.updated_at) } : null;
+  }
+
+  set(guildId: string, kind: PanelKind, channelId: string, messageId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO panels (guild_id, kind, channel_id, message_id, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(guild_id, kind) DO UPDATE SET channel_id=excluded.channel_id, message_id=excluded.message_id, updated_at=excluded.updated_at`,
+      )
+      .run(guildId, kind, channelId, messageId, nowIso());
+  }
+
+  delete(guildId: string, kind: PanelKind): void {
+    this.db.prepare('DELETE FROM panels WHERE guild_id = ? AND kind = ?').run(guildId, kind);
+  }
+}
+
+function mapGrant(r: Row): PresenceGrant {
+  return {
+    guildId: String(r.guild_id),
+    userId: String(r.user_id),
+    startedAt: String(r.started_at),
+    url: s(r.url),
+    platform: (s(r.platform) as PresenceGrant['platform']) ?? null,
+    title: s(r.title),
+    game: s(r.game),
+    messageChannelId: s(r.message_channel_id),
+    messageId: s(r.message_id),
+  };
+}
+
+/** #15 — live roles given because of a Discord Streaming presence. */
+export class PresenceRepo {
+  constructor(private readonly db: Db) {}
+
+  get(guildId: string, userId: string): PresenceGrant | null {
+    const r = this.db.prepare('SELECT * FROM presence_grants WHERE guild_id = ? AND user_id = ?').get(guildId, userId) as Row | undefined;
+    return r ? mapGrant(r) : null;
+  }
+
+  list(guildId?: string): PresenceGrant[] {
+    const rows = (guildId
+      ? this.db.prepare('SELECT * FROM presence_grants WHERE guild_id = ?').all(guildId)
+      : this.db.prepare('SELECT * FROM presence_grants').all()) as Row[];
+    return rows.map(mapGrant);
+  }
+
+  upsert(grant: PresenceGrant): void {
+    this.db
+      .prepare(
+        `INSERT INTO presence_grants (guild_id, user_id, started_at, url, platform, title, game, message_channel_id, message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(guild_id, user_id) DO UPDATE SET url=excluded.url, platform=excluded.platform, title=excluded.title, game=excluded.game,
+           message_channel_id=excluded.message_channel_id, message_id=excluded.message_id`,
+      )
+      .run(grant.guildId, grant.userId, grant.startedAt, grant.url, grant.platform, grant.title, grant.game, grant.messageChannelId, grant.messageId);
+  }
+
+  delete(guildId: string, userId: string): void {
+    this.db.prepare('DELETE FROM presence_grants WHERE guild_id = ? AND user_id = ?').run(guildId, userId);
+  }
+}
+
+/** #6 — daily clip digest queue. */
+export class DigestRepo {
+  constructor(private readonly db: Db) {}
+
+  /** Returns false when the item is already queued for that guild. */
+  enqueue(guildId: string, contentItemId: number, streamerId: number | null): boolean {
+    return (
+      n(
+        this.db
+          .prepare('INSERT OR IGNORE INTO digest_queue (guild_id, content_item_id, streamer_id, queued_at) VALUES (?, ?, ?, ?)')
+          .run(guildId, contentItemId, streamerId, nowIso()).changes,
+      ) > 0
+    );
+  }
+
+  pending(guildId: string): Array<DigestEntry & { item: StoredContentItem }> {
+    const rows = this.db
+      .prepare(
+        `SELECT d.id AS d_id, d.guild_id AS d_guild_id, d.content_item_id AS d_content_item_id, d.streamer_id AS d_streamer_id,
+           d.queued_at AS d_queued_at, d.posted_at AS d_posted_at, ci.*
+         FROM digest_queue d JOIN content_items ci ON ci.id = d.content_item_id
+         WHERE d.guild_id = ? AND d.posted_at IS NULL ORDER BY d.id`,
+      )
+      .all(guildId) as Row[];
+    return rows.map((r) => ({
+      id: n(r.d_id),
+      guildId: String(r.d_guild_id),
+      contentItemId: n(r.d_content_item_id),
+      streamerId: r.d_streamer_id == null ? null : n(r.d_streamer_id),
+      queuedAt: String(r.d_queued_at),
+      postedAt: s(r.d_posted_at),
+      item: mapContent(r),
+    }));
+  }
+
+  guildsWithPending(): string[] {
+    return (this.db.prepare('SELECT DISTINCT guild_id FROM digest_queue WHERE posted_at IS NULL').all() as Row[]).map((r) => String(r.guild_id));
+  }
+
+  markPosted(ids: number[]): void {
+    const now = nowIso();
+    for (const id of ids) this.db.prepare('UPDATE digest_queue SET posted_at = ? WHERE id = ?').run(now, id);
+  }
+
+  prune(olderThanDays = 30): number {
+    const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+    return n(this.db.prepare('DELETE FROM digest_queue WHERE posted_at IS NOT NULL AND posted_at < ?').run(cutoff).changes);
+  }
+}
+
 /** All repositories bundled. Construct once and pass around. */
 export class Repositories {
   readonly settings: SettingsRepo;
@@ -730,6 +1063,12 @@ export class Repositories {
   readonly audit: AuditRepo;
   readonly webSessions: WebSessionRepo;
   readonly kv: KvRepo;
+  readonly samples: SampleRepo;
+  readonly applications: ApplicationRepo;
+  readonly links: LinkRepo;
+  readonly panels: PanelRepo;
+  readonly presence: PresenceRepo;
+  readonly digest: DigestRepo;
 
   constructor(readonly db: Db) {
     this.settings = new SettingsRepo(db);
@@ -741,6 +1080,12 @@ export class Repositories {
     this.audit = new AuditRepo(db);
     this.webSessions = new WebSessionRepo(db);
     this.kv = new KvRepo(db);
+    this.samples = new SampleRepo(db);
+    this.applications = new ApplicationRepo(db);
+    this.links = new LinkRepo(db);
+    this.panels = new PanelRepo(db);
+    this.presence = new PresenceRepo(db);
+    this.digest = new DigestRepo(db);
   }
 
   tx<T>(fn: () => T): T {

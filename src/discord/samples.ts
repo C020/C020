@@ -93,6 +93,7 @@ function sampleStreamer(settings: GuildSettings, identity: SampleIdentity, now: 
     discordUserId: identity.discordUserId,
     displayName: identity.displayName,
     notes: null,
+    templates: {},
     color: null,
     enabled: true,
     createdAt: at,

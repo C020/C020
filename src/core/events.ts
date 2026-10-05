@@ -10,6 +10,8 @@ export interface AppEventMap {
   'content.announced': { guildId: string; streamerId: number; platform: Platform; title: string; url: string };
   /** An audit entry was recorded. */
   audit: AuditEntry;
+  /** #9 — an application was created or decided. */
+  'application.changed': { guildId: string; applicationId: number; status: 'pending' | 'approved' | 'rejected' | 'cancelled' };
   /** Provider health changed (errors / recovered). */
   'provider.health': { platform: Platform; ok: boolean; message: string | null };
 }

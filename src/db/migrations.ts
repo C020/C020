@@ -176,4 +176,100 @@ export const MIGRATIONS: { id: number; name: string; sql: string }[] = [
       ALTER TABLE live_sessions ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    id: 3,
+    name: 'features_v2',
+    sql: /* sql */ `
+      ALTER TABLE guild_settings ADD COLUMN features TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE streamers ADD COLUMN templates TEXT NOT NULL DEFAULT '{}';
+
+      -- #13 viewer samples per session
+      CREATE TABLE live_samples (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id     INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+        at             TEXT NOT NULL,
+        total_viewers  INTEGER,
+        platforms      TEXT NOT NULL DEFAULT '{}',
+        category       TEXT
+      );
+      CREATE INDEX idx_samples_session ON live_samples(session_id, at);
+
+      -- #9 streamer applications
+      CREATE TABLE applications (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id           TEXT NOT NULL,
+        user_id            TEXT NOT NULL,
+        username           TEXT NOT NULL,
+        accounts           TEXT NOT NULL DEFAULT '[]',
+        note               TEXT,
+        status             TEXT NOT NULL DEFAULT 'pending',
+        reviewer_id        TEXT,
+        review_note        TEXT,
+        streamer_id        INTEGER,
+        review_channel_id  TEXT,
+        review_message_id  TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        decided_at         TEXT
+      );
+      CREATE INDEX idx_applications_guild ON applications(guild_id, status, id);
+      -- at most one pending application per member and guild
+      CREATE UNIQUE INDEX idx_applications_pending ON applications(guild_id, user_id) WHERE status = 'pending';
+
+      -- #11 official account links
+      CREATE TABLE account_links (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        discord_user_id     TEXT NOT NULL,
+        platform            TEXT NOT NULL,
+        platform_user_id    TEXT NOT NULL,
+        platform_login      TEXT,
+        display_name        TEXT,
+        access_token_enc    TEXT,
+        refresh_token_enc   TEXT,
+        scopes              TEXT NOT NULL DEFAULT '[]',
+        access_expires_at   TEXT,
+        refresh_expires_at  TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        UNIQUE (discord_user_id, platform)
+      );
+      CREATE INDEX idx_links_platform_user ON account_links(platform, platform_user_id);
+
+      -- interactive panels posted by the bot
+      CREATE TABLE panels (
+        guild_id    TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        channel_id  TEXT NOT NULL,
+        message_id  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (guild_id, kind)
+      );
+
+      -- #15 roles given because of a Discord Streaming presence
+      CREATE TABLE presence_grants (
+        guild_id            TEXT NOT NULL,
+        user_id             TEXT NOT NULL,
+        started_at          TEXT NOT NULL,
+        url                 TEXT,
+        platform            TEXT,
+        title               TEXT,
+        game                TEXT,
+        message_channel_id  TEXT,
+        message_id          TEXT,
+        PRIMARY KEY (guild_id, user_id)
+      );
+
+      -- #6 daily clip digest queue
+      CREATE TABLE digest_queue (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id         TEXT NOT NULL,
+        content_item_id  INTEGER NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+        streamer_id      INTEGER,
+        queued_at        TEXT NOT NULL,
+        posted_at        TEXT,
+        UNIQUE (guild_id, content_item_id)
+      );
+      CREATE INDEX idx_digest_pending ON digest_queue(guild_id, posted_at);
+    `,
+  },
 ];

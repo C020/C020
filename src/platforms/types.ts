@@ -10,12 +10,23 @@ export interface KeyValueStore {
   delete(key: string): void;
 }
 
+/**
+ * #11 — official OAuth tokens of streamers who linked their account (optional). Providers use them to read data
+ * through official APIs instead of unofficial ones (e.g. TikTok Display API video.list).
+ */
+export interface LinkedTokenSource {
+  /** A valid (refreshed if needed) TikTok user access token for this handle, or null when the account isn't linked. */
+  tiktokAccessToken(handle: string): Promise<{ accessToken: string; openId: string } | null>;
+}
+
 export interface ProviderContext {
   config: AppConfig;
   logger: Logger;
   kv: KeyValueStore;
   /** Injected fetch (tests pass a mock). */
   fetch?: FetchLike;
+  /** Optional linked-account tokens (absent in tests and when linking is not configured). */
+  links?: LinkedTokenSource;
 }
 
 export interface ProviderCapabilities {
