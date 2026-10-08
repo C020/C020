@@ -82,6 +82,8 @@ function stubSessions(): SessionServiceApi {
     liveViews: () => [],
     summaryOf: () => null,
     endStreamerSession: async () => {},
+    reconcileLiveRoles: async () => {},
+    setExtraLiveUsers: () => {},
   };
 }
 

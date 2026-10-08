@@ -7,6 +7,7 @@ import { formatClockDuration, formatCompact, formatNumber, formatTime, secondsBe
 import { platformAlpha, sortPlatforms } from '../lib/platforms';
 import { PlatformBadge, PlatformIcon } from './PlatformIcon';
 import { StreamerAvatar } from './StreamerAvatar';
+import { t } from '../i18n';
 
 /** Picks the platform shown in the banner: the one with the most viewers. */
 function primaryPlatform(item: LiveNowItem): LiveNowItem['platforms'][number] | undefined {
@@ -50,17 +51,17 @@ export function LiveCard({ item }: { item: LiveNowItem }) {
             <span className="size-1.5 animate-pulse rounded-full bg-white" />
             LIVE
           </span>
-          <span className="inline-flex items-center gap-1 rounded-md bg-black/60 px-2 py-0.5 text-[12px] font-medium tabular-nums text-white backdrop-blur" title={`${formatNumber(viewers)} مشاهد`}>
+          <span className="inline-flex items-center gap-1 rounded-md bg-black/60 px-2 py-0.5 text-[12px] font-medium tabular-nums text-white backdrop-blur" title={t('live.viewersTitle', { n: formatNumber(viewers) })}>
             <Eye className="size-3.5" />
             {formatCompact(viewers)}
           </span>
         </div>
         <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-2 text-[12px] text-zinc-200">
-          <span className="inline-flex items-center gap-1 rounded-md bg-black/50 px-2 py-0.5 tabular-nums backdrop-blur" dir="ltr" title={`بدأ الساعة ${formatTime(item.startedAt)}`}>
+          <span className="inline-flex items-center gap-1 rounded-md bg-black/50 px-2 py-0.5 tabular-nums backdrop-blur" dir="ltr" title={t('live.startedAt', { time: formatTime(item.startedAt) })}>
             <Clock className="size-3.5" />
             {formatClockDuration(secondsBetween(item.startedAt, now))}
           </span>
-          {item.peakViewers > 0 && <span className="rounded-md bg-black/50 px-2 py-0.5 backdrop-blur">الذروة {formatCompact(item.peakViewers)}</span>}
+          {item.peakViewers > 0 && <span className="rounded-md bg-black/50 px-2 py-0.5 backdrop-blur">{t('live.peak', { n: formatCompact(item.peakViewers) })}</span>}
         </div>
       </div>
 
@@ -70,7 +71,7 @@ export function LiveCard({ item }: { item: LiveNowItem }) {
           <div className="min-w-0 flex-1">
             <p className="truncate font-semibold text-zinc-100">{item.streamer.displayName}</p>
             <p className={cn('mt-0.5 line-clamp-2 text-[13px] leading-relaxed', snapshot?.title ? 'text-zinc-300' : 'italic text-zinc-500')} dir="auto">
-              {snapshot?.title || 'بدون عنوان'}
+              {snapshot?.title || t('common.untitled')}
             </p>
           </div>
         </div>
@@ -102,7 +103,7 @@ export function LiveCard({ item }: { item: LiveNowItem }) {
             className="-mx-4 -mb-4 mt-1 flex items-center justify-center gap-1.5 border-t border-white/[0.06] py-2.5 text-[12.5px] text-zinc-400 transition-colors hover:bg-white/[0.03] hover:text-zinc-200"
           >
             <MessageSquare className="size-3.5" />
-            فتح الإشعار في ديسكورد
+            {t('live.openInDiscord')}
             <ExternalLink className="size-3" />
           </a>
         )}

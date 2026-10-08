@@ -9,6 +9,7 @@ import { readStorage } from '../hooks/useLocalStorage';
 import { LAST_GUILD_KEY } from '../hooks/usePreferences';
 import { useSession } from '../hooks/useSession';
 import { formatCompact } from '../lib/format';
+import { t } from '../i18n';
 
 /** "/" → the last used guild, the only guild, or the picker. */
 export function HomeRedirect() {
@@ -23,11 +24,11 @@ export function GuildPickerPage() {
   return (
     <AppShell>
       <PageHeader
-        title={`هلا ${me.user.username} 👋`}
-        description="اختر السيرفر اللي تبي تديره"
+        title={t('guilds.hello', { name: me.user.username })}
+        description={t('guilds.pick')}
         actions={
           <LinkButton href={me.inviteUrl} external variant="secondary" icon={<Plus className="size-4" />}>
-            إضافة البوت لسيرفر
+            {t('shell.invite')}
           </LinkButton>
         }
       />
@@ -35,11 +36,11 @@ export function GuildPickerPage() {
         <div className="glass rounded-2xl">
           <EmptyState
             icon={<ServerOff className="size-6" />}
-            title="ما فيه سيرفر تقدر تديره"
-            description="لازم يكون البوت موجود في السيرفر، ويكون عندك صلاحية Manage Server فيه. ادعُ البوت وبعدها حدّث الصفحة."
+            title={t('guilds.noneTitle')}
+            description={t('guilds.noneDesc')}
             action={
               <LinkButton href={me.inviteUrl} external variant="primary" icon={<Plus className="size-4" />}>
-                دعوة البوت
+                {t('problems.fix.invite')}
               </LinkButton>
             }
           />
@@ -55,9 +56,9 @@ export function GuildPickerPage() {
               <Avatar src={guild.iconUrl} name={guild.name} size={52} rounded="xl" />
               <div className="min-w-0 flex-1">
                 <p className="truncate font-semibold text-zinc-100">{guild.name}</p>
-                <p className="mt-0.5 text-[13px] text-zinc-500">{formatCompact(guild.memberCount)} عضو</p>
+                <p className="mt-0.5 text-[13px] text-zinc-500">{t('guilds.members', { n: formatCompact(guild.memberCount) })}</p>
               </div>
-              <ChevronLeft className="size-5 text-zinc-600 transition-transform group-hover:-translate-x-1 group-hover:text-zinc-300" />
+              <ChevronLeft className="size-5 text-zinc-600 transition-transform group-hover:text-zinc-300 ltr:rotate-180 rtl:group-hover:-translate-x-1 ltr:group-hover:translate-x-1" />
             </Link>
           ))}
         </div>

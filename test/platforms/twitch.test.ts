@@ -966,3 +966,16 @@ describe('createTwitchProvider', () => {
     expect(provider.isConfigured()).toBe(false);
   });
 });
+
+describe('clip featured flag (#6)', () => {
+  it('maps Get Clips is_featured to ContentItem.featured, null when missing', async () => {
+    const api = fakeTwitch({
+      'GET /clips': () => json({ data: [{ ...clip('f1', -HOUR), is_featured: true }, { ...clip('f2', -2 * HOUR), is_featured: false }, clip('f3', -3 * HOUR)], pagination: {} }),
+    });
+    const items = await makeProvider(api.fetchImpl).fetchRecentContent(channel('100', 'alpha'), ['clip']);
+    const byId = new Map(items.map((i) => [i.contentId, i.featured]));
+    expect(byId.get('f1')).toBe(true);
+    expect(byId.get('f2')).toBe(false);
+    expect(byId.get('f3')).toBeNull();
+  });
+});

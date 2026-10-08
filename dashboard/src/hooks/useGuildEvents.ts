@@ -1,11 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { createInvalidationBatcher, keys, prependAuditEntry } from '../api/queries';
-import type { AuditEntry, ContentEventData, LiveEventData, StreamerDto } from '../api/types';
+import type { ApplicationEventData, AuditEntry, ContentEventData, LiveEventData, StreamerDto } from '../api/types';
 import { actorUserId, touchesDiscordLookups, touchesSettings, touchesStreamers } from '../lib/audit';
 import { PLATFORM_META } from '../lib/platforms';
 import { toast } from '../lib/toast';
 import { useLatest } from './useLatest';
+import { t } from '../i18n/core';
 
 export type RealtimeStatus = 'connecting' | 'open' | 'reconnecting' | 'paused';
 
@@ -86,7 +87,7 @@ export function useGuildEvents(guildId: string, options: GuildEventsOptions): Re
       batcher.add(keys.leaderboard(guildId));
       if (data.status === 'live' && opts.current.notify) {
         const name = streamerName(data.streamerId);
-        toast.live(name ? `${name} بدأ بث مباشر` : 'فيه ستريمر بدأ بث مباشر', { description: 'الإشعار انرسل في روم البث' });
+        toast.live(name ? t('realtime.wentLive', { name }) : t('realtime.someoneLive'), { description: t('realtime.liveSent') });
       }
     };
 
@@ -95,11 +96,18 @@ export function useGuildEvents(guildId: string, options: GuildEventsOptions): Re
       batcher.add(keys.content(guildId));
       if (opts.current.notify) {
         const name = data.streamer?.displayName ?? streamerName(data.streamerId);
-        toast.info(`${name ?? 'ستريمر'} نزّل مقطع جديد على ${PLATFORM_META[data.platform].label}`, {
+        toast.info(t('realtime.newContent', { name: name ?? t('realtime.aStreamer'), platform: PLATFORM_META[data.platform].label }), {
           description: data.title,
-          action: data.url ? { label: 'فتح المقطع', href: data.url } : undefined,
+          action: data.url ? { label: t('realtime.openContent'), href: data.url } : undefined,
         });
       }
+    };
+
+    const onApplication = (data: ApplicationEventData): void => {
+      batcher.add(keys.applications(guildId));
+      batcher.add(keys.overview(guildId));
+      if (data.status === 'approved') batcher.add(keys.streamers(guildId));
+      if (data.status === 'pending' && opts.current.notify) toast.info(t('realtime.newApplication'), { description: t('realtime.newApplicationDesc') });
     };
 
     const onAudit = (entry: AuditEntry): void => {
@@ -153,6 +161,7 @@ export function useGuildEvents(guildId: string, options: GuildEventsOptions): Re
       listen<LiveEventData>(es, 'live', onLive);
       listen<ContentEventData>(es, 'content', onContent);
       listen<AuditEntry>(es, 'audit', onAudit);
+      listen<ApplicationEventData>(es, 'application', onApplication);
       listen<unknown>(es, 'ping', () => undefined);
     }
 

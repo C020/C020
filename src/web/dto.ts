@@ -2,12 +2,27 @@
 import type { AppContext } from '../app/context.js';
 import { childLogger } from '../core/logger.js';
 import type { Platform, ResolvedChannel } from '../core/types.js';
-import type { AccountWithChannel, GuildSettings, LiveSession, StoredContentItem, Streamer, StreamerWithAccounts } from '../db/models.js';
+import type {
+  AccountLink,
+  AccountWithChannel,
+  GuildSettings,
+  LiveSample,
+  LiveSession,
+  StoredContentItem,
+  Streamer,
+  StreamerApplication,
+  StreamerWithAccounts,
+} from '../db/models.js';
+import type { StreamerStatsData } from '../app/context.js';
 import type { LiveView, MessageRef, SummaryView } from '../services/ports.js';
 import { mergedDurationMs } from '../services/views.js';
 import type {
   AccountDto,
+  ApplicationDto,
   ContentDto,
+  SessionDetailDto,
+  StreamerStatsDto,
+  ViewerSampleDto,
   LeaderboardEntry,
   LiveNowItem,
   ResolvePreview,
@@ -40,11 +55,37 @@ export function toSettingsDto(s: GuildSettings): SettingsDto {
     contentKinds: [...s.contentKinds],
     templates: s.templates,
     options: { ...s.options },
+    features: structuredClone(s.features),
     updatedAt: s.updatedAt,
   };
 }
 
-export function toAccountDto(a: AccountWithChannel): AccountDto {
+const normHandle = (v: string | null | undefined): string => (v ?? '').trim().replace(/^@/, '').toLowerCase();
+
+/**
+ * #11 — an account is verified when the member linked that exact platform account: Twitch by user id (the channel's
+ * platformId), TikTok by open id or by the unique username (the channel handle).
+ */
+export function isVerifiedAccount(a: AccountWithChannel, links: readonly AccountLink[]): boolean {
+  const ch = a.channel;
+  if (ch.platform !== 'twitch' && ch.platform !== 'tiktok') return false;
+  return links.some((l) => {
+    if (l.platform !== ch.platform) return false;
+    if (l.platformUserId && l.platformUserId === ch.platformId) return true;
+    if (l.platform === 'tiktok' && l.platformLogin && normHandle(l.platformLogin) === normHandle(ch.handle)) return true;
+    return false;
+  });
+}
+
+export function toLinkDto(l: AccountLink): StreamerDto['links'][number] {
+  return { platform: l.platform, platformUserId: l.platformUserId, login: l.platformLogin, linkedAt: l.createdAt };
+}
+
+export function toSampleDto(s: LiveSample): ViewerSampleDto {
+  return { at: s.at, total: s.totalViewers, platforms: { ...s.platforms }, category: s.category };
+}
+
+export function toAccountDto(a: AccountWithChannel, links: readonly AccountLink[] = []): AccountDto {
   const ch = a.channel;
   return {
     id: a.id,
@@ -61,6 +102,7 @@ export function toAccountDto(a: AccountWithChannel): AccountDto {
     snapshot: ch.isLive ? ch.liveSnapshot : null,
     lastCheckedAt: ch.lastLiveCheckAt,
     lastError: ch.lastError,
+    verified: isVerifiedAccount(a, links),
   };
 }
 
@@ -124,6 +166,7 @@ export class DtoMapper {
     stats: Map<number, StreamerDto['stats']>,
     live: Set<number>,
   ): StreamerDto {
+    const links = this.linksOf(s.discordUserId);
     return {
       id: s.id,
       discordUserId: s.discordUserId,
@@ -131,13 +174,25 @@ export class DtoMapper {
       avatarUrl: memberAvatar(lookup) ?? s.accounts.find((a) => a.channel.avatarUrl)?.channel.avatarUrl ?? null,
       notes: s.notes,
       color: s.color,
+      templates: structuredClone(s.templates ?? {}),
       enabled: s.enabled,
       isLive: live.has(s.id) || s.accounts.some((a) => a.channel.isLive),
       inGuild: inGuildOf(lookup),
-      accounts: s.accounts.map(toAccountDto),
+      links: links.map(toLinkDto),
+      accounts: s.accounts.map((a) => toAccountDto(a, links)),
       stats: stats.get(s.id) ?? { sessions30d: 0, hours30d: 0, peakViewers30d: 0 },
       createdAt: s.createdAt,
     };
+  }
+
+  /** Official links of a member (never fails the response: links are optional). */
+  private linksOf(discordUserId: string): AccountLink[] {
+    try {
+      return this.ctx.repos.links.forUser(discordUserId);
+    } catch (err) {
+      log.warn({ err }, 'Reading account links failed');
+      return [];
+    }
   }
 
   private statsByStreamer(guildId: string): Map<number, StreamerDto['stats']> {
@@ -255,6 +310,92 @@ export class DtoMapper {
         snapshot: p.snapshot,
       })),
       messageUrl: this.messageUrl(view.guildId, view.session),
+    };
+  }
+
+  /** #13 — session with viewer samples and per-platform segments. */
+  sessionDetail(session: LiveSession, streamer: StreamerSummary, samples: LiveSample[]): SessionDetailDto {
+    const base = this.session(session, streamer);
+    const channels = new Map<number, { displayName: string; url: string } | null>();
+    const channelOf = (id: number) => {
+      if (!channels.has(id)) {
+        const ch = this.ctx.repos.channels.get(id);
+        channels.set(id, ch ? { displayName: ch.displayName, url: ch.url } : null);
+      }
+      return channels.get(id) ?? null;
+    };
+    return {
+      ...base,
+      samples: samples.map(toSampleDto),
+      segments: this.ctx.repos.sessions.segments(session.id).map((seg) => {
+        const ch = channelOf(seg.channelId);
+        return {
+          platform: seg.platform,
+          channelId: seg.channelId,
+          displayName: ch?.displayName ?? seg.platform,
+          url: ch?.url ?? '',
+          startedAt: seg.startedAt,
+          endedAt: seg.endedAt,
+          peakViewers: seg.peakViewers,
+          vodUrl: seg.vodUrl,
+        };
+      }),
+    };
+  }
+
+  /** #13 — streamer statistics (domain data from StatsService → DTO). */
+  streamerStats(streamer: Streamer, data: StreamerStatsData): StreamerStatsDto {
+    const summary = this.summaryOf(streamer);
+    const recentSessions: SessionDto[] = [];
+    for (const id of data.recentSessionIds) {
+      const session = this.ctx.repos.sessions.get(id);
+      if (session && session.guildId === streamer.guildId && session.streamerId === streamer.id) recentSessions.push(this.session(session, summary));
+    }
+    const hours = Array.from({ length: 24 }, (_, i) => Math.max(0, Math.round(data.hours[i] ?? 0)));
+    return {
+      streamer: summary,
+      days: data.days,
+      totals: { ...data.totals },
+      daily: data.daily.map((d) => ({ ...d })),
+      platforms: data.platforms.map((p) => ({ ...p })),
+      categories: data.categories.map((c) => ({ ...c })),
+      hours,
+      recentSessions,
+    };
+  }
+
+  // ───────────────────────────── applications ─────────────────────────────
+
+  /** #9 — applications of one guild; member avatars come from the member cache (warmed within a short budget). */
+  async applications(guildId: string, list: StreamerApplication[]): Promise<ApplicationDto[]> {
+    const ids = [...new Set(list.flatMap((a) => (a.reviewerId ? [a.userId, a.reviewerId] : [a.userId])))];
+    try {
+      await this.members.warm(guildId, ids, LIST_MEMBER_BUDGET_MS);
+    } catch (err) {
+      log.debug({ err }, 'Warming applicant members failed');
+    }
+    return list.map((a) => this.application(a));
+  }
+
+  application(a: StreamerApplication): ApplicationDto {
+    const lookup = this.members.peek(a.guildId, a.userId);
+    const reviewer = a.reviewerId ? this.members.peek(a.guildId, a.reviewerId) : null;
+    return {
+      id: a.id,
+      userId: a.userId,
+      username: a.username,
+      avatarUrl: memberAvatar(lookup),
+      inGuild: inGuildOf(lookup),
+      accounts: a.accounts.map((acc) => ({ platform: acc.platform, input: acc.input })),
+      note: a.note,
+      status: a.status,
+      reviewer: a.reviewerId
+        ? { id: a.reviewerId, username: reviewer && reviewer.status === 'member' ? reviewer.member.displayName : null }
+        : null,
+      reviewNote: a.reviewNote,
+      streamerId: a.streamerId,
+      createdAt: a.createdAt,
+      decidedAt: a.decidedAt,
     };
   }
 

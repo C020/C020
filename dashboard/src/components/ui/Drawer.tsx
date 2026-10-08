@@ -3,6 +3,7 @@ import { useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../lib/cn';
 import { useOverlayBehavior } from './overlay';
+import { t } from '../../i18n';
 
 export interface DrawerProps {
   open: boolean;
@@ -45,7 +46,7 @@ export function Drawer({ open, onClose, title, header, footer, children, width =
                 </h2>
               ))}
           </div>
-          <button type="button" onClick={onClose} aria-label="إغلاق" className="grid size-8 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-white/[0.06] hover:text-white">
+          <button type="button" onClick={onClose} aria-label={t('common.close')} className="grid size-8 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-white/[0.06] hover:text-white">
             <X className="size-4" />
           </button>
         </div>

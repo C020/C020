@@ -121,6 +121,9 @@ export class SseHub {
         const streamer = safe(() => this.dto.summaries(guildId)(e.streamerId));
         send('content', { streamerId: e.streamerId, streamer, platform: e.platform, title: e.title, url: e.url });
       }),
+      this.ctx.events.on('application.changed', (e) => {
+        if (e.guildId === guildId) send('application', { applicationId: e.applicationId, status: e.status });
+      }),
       this.ctx.events.on('audit', (entry) => {
         // Same visibility as the audit list: this guild's entries plus global (bot-wide) ones.
         if (entry.guildId === guildId || entry.guildId === null) send('audit', entry);

@@ -4,8 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vi } from 'vitest';
 import type {
+  AccountInput,
   AppContext,
+  ApplicationServiceApi,
+  CounterServiceApi,
   DiscordApi,
+  ManualPostPreview,
+  ManualPostServiceApi,
+  PresenceServiceApi,
+  StatsServiceApi,
+  StreamerStatsData,
   MonitorApi,
   ProviderRegistryApi,
   ProviderRuntimeStatus,
@@ -18,7 +26,7 @@ import { AppEvents } from '../../src/core/events.js';
 import type { Platform, ResolvedChannel } from '../../src/core/types.js';
 import { PLATFORMS } from '../../src/core/types.js';
 import { openDatabase } from '../../src/db/database.js';
-import type { StreamerWithAccounts, WebSessionGuild } from '../../src/db/models.js';
+import type { LinkPlatform, PanelKind, StreamerApplication, StreamerWithAccounts, WebSessionGuild } from '../../src/db/models.js';
 import { Repositories } from '../../src/db/repositories.js';
 import type { PlatformProvider, WebhookAdapter } from '../../src/platforms/types.js';
 import { AuditService } from '../../src/services/audit.js';
@@ -28,6 +36,7 @@ import type {
   DiscordRoleInfo,
   EditOutcome,
   MessageRef,
+  RenameOutcome,
   RoleChangeOutcome,
   SummaryOutcome,
 } from '../../src/services/ports.js';
@@ -65,6 +74,9 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     KICK_CLIENT_ID: undefined,
     KICK_CLIENT_SECRET: undefined,
     KICK_UNOFFICIAL_CONTENT: false,
+    DISCORD_PRESENCE_INTENT: false,
+    TIKTOK_CLIENT_KEY: undefined,
+    TIKTOK_CLIENT_SECRET: undefined,
     YOUTUBE_API_KEY: undefined,
     YOUTUBE_WEBSUB_SECRET: undefined,
     TIKTOK_SIGN_API_KEY: undefined,
@@ -102,6 +114,8 @@ export class FakeDiscord implements DiscordApi {
   }));
   readonly preview = vi.fn(async () => ({ content: null, embeds: [{ title: 'معاينة' }], buttons: [] }));
   readonly fetchMember = vi.fn(async (guildId: string, userId: string) => this.members.get(`${guildId}:${userId}`) ?? null);
+  presenceIntent = false;
+  readonly postPanel = vi.fn(async (_guildId: string, _kind: PanelKind): Promise<MessageRef> => ({ channelId: CHANNEL_A, messageId: '223456789012345678' }));
   readonly removeRoleFrom = vi.fn(async (_guildId: string, _roleId: string, _userIds: string[], _reason: string): Promise<void> => {});
 
   addMember(guildId: string, id: string, displayName: string): void {
@@ -158,6 +172,31 @@ export class FakeDiscord implements DiscordApi {
     return null;
   }
   async log() {}
+  async postDigest() {
+    return null;
+  }
+  async postPresenceLive() {
+    return null;
+  }
+  async endPresenceLive() {
+    return true;
+  }
+  onGatewayRecovered() {}
+  presenceIntentEnabled() {
+    return this.presenceIntent;
+  }
+  async renameChannel(): Promise<{ outcome: RenameOutcome }> {
+    return { outcome: 'ok' };
+  }
+  async sendDirectMessage() {
+    return true;
+  }
+  async upsertApplicationReview() {
+    return null;
+  }
+  async streamingPresences() {
+    return null;
+  }
   async setLive(): Promise<RoleChangeOutcome> {
     return 'noop';
   }
@@ -268,8 +307,80 @@ export function fakeSessions() {
     liveViews: vi.fn((): ReturnType<SessionServiceApi['liveViews']> => []),
     summaryOf: vi.fn((): ReturnType<SessionServiceApi['summaryOf']> => null),
     endStreamerSession: vi.fn(async () => {}),
+    reconcileLiveRoles: vi.fn(async () => {}),
+    setExtraLiveUsers: vi.fn(),
   };
   return service satisfies SessionServiceApi;
+}
+
+/** v2 service stubs (tests override the methods they exercise). */
+export function fakeV2Services(repos: Repositories) {
+  const applications = {
+    submit: vi.fn(async (): Promise<StreamerApplication> => {
+      throw new ValidationError('not used');
+    }),
+    list: vi.fn((guildId: string, opts: { status?: StreamerApplication['status']; limit?: number; beforeId?: number } = {}) => repos.applications.list(guildId, opts)),
+    get: vi.fn((guildId: string, id: number) => {
+      const app = repos.applications.get(id);
+      if (!app || app.guildId !== guildId) throw new ValidationError('الطلب غير موجود');
+      return app;
+    }),
+    approve: vi.fn(async (guildId: string, id: number, actor: string, _opts?: { note?: string | null; accounts?: AccountInput[] }) => {
+      const app = repos.applications.get(id)!;
+      const s = repos.streamers.create({ guildId, discordUserId: app.userId, displayName: app.username });
+      const application = repos.applications.update(id, { status: 'approved', reviewerId: actor.replace('user:', ''), streamerId: s.id, decidedAt: new Date().toISOString() })!;
+      return { application, streamer: repos.streamerWithAccounts(s.id)!, skipped: [] as Array<{ platform: Platform; input: string; reason: string }> };
+    }),
+    reject: vi.fn(async (_guildId: string, id: number, actor: string, note?: string | null) =>
+      repos.applications.update(id, { status: 'rejected', reviewerId: actor.replace('user:', ''), reviewNote: note ?? null, decidedAt: new Date().toISOString() })!,
+    ),
+    cancel: vi.fn(async () => false),
+  } satisfies ApplicationServiceApi;
+  const manualPosts = {
+    inspect: vi.fn(async (_guildId: string, url: string): Promise<ManualPostPreview> => ({
+      platform: 'kick',
+      kind: 'clip',
+      contentId: 'clip1',
+      url,
+      title: null,
+      thumbnailUrl: null,
+      streamer: null,
+      channelId: CHANNEL_A,
+      alreadyPosted: false,
+    })),
+    post: vi.fn(async () => ({ messageRef: { channelId: CHANNEL_A, messageId: '323456789012345678' } as MessageRef | null, contentItemId: 1 })),
+  } satisfies ManualPostServiceApi;
+  const stats = {
+    sessionSamples: vi.fn((sessionId: number) => repos.samples.forSession(sessionId)),
+    streamerStats: vi.fn(
+      (_guildId: string, streamerId: number, days: number): StreamerStatsData => ({
+        streamerId,
+        days,
+        totals: { sessions: 0, seconds: 0, peakViewers: 0, avgViewers: null, contentPosts: 0 },
+        daily: [],
+        platforms: [],
+        categories: [],
+        hours: Array.from({ length: 24 }, () => 0),
+        recentSessionIds: [],
+      }),
+    ),
+  } satisfies StatsServiceApi;
+  const presence = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    onPresence: vi.fn(async () => {}),
+    liveUserIds: vi.fn(() => new Set<string>()),
+    reconcile: vi.fn(async () => {}),
+  } satisfies PresenceServiceApi;
+  const counter = { start: vi.fn(), stop: vi.fn(), refresh: vi.fn() } satisfies CounterServiceApi;
+  const links = {
+    isAvailable: vi.fn((_platform: LinkPlatform) => false),
+    startUrl: vi.fn(() => 'https://bot.example.com/link/start?t=x'),
+    linksFor: vi.fn((userId: string) => repos.links.forUser(userId)),
+    unlink: vi.fn(async (userId: string, platform: LinkPlatform) => repos.links.delete(userId, platform)),
+    tiktokAccessToken: vi.fn(async () => null),
+  };
+  return { applications, manualPosts, stats, presence, counter, links };
 }
 
 export interface TestEnv {
@@ -281,6 +392,8 @@ export interface TestEnv {
   providers: FakeProviders;
   streamers: ReturnType<typeof fakeStreamers>;
   sessions: ReturnType<typeof fakeSessions>;
+  v2: ReturnType<typeof fakeV2Services>;
+  content: { onNewContent: () => Promise<void>; postDigestNow: ReturnType<typeof vi.fn> };
 }
 
 export function createEnv(config: Partial<AppConfig> = {}, providers = new FakeProviders()): TestEnv {
@@ -290,6 +403,11 @@ export function createEnv(config: Partial<AppConfig> = {}, providers = new FakeP
   const monitor = new FakeMonitor();
   const streamers = fakeStreamers(repos);
   const sessions = fakeSessions();
+  const v2 = fakeV2Services(repos);
+  const content = {
+    onNewContent: async () => {},
+    postDigestNow: vi.fn(async (): Promise<MessageRef | null> => ({ channelId: CHANNEL_A, messageId: '423456789012345678' })),
+  };
   const ctx: AppContext = {
     config: makeConfig(config),
     version: '1.2.3',
@@ -301,10 +419,16 @@ export function createEnv(config: Partial<AppConfig> = {}, providers = new FakeP
     monitor,
     streamers,
     sessions,
-    content: { onNewContent: async () => {} },
+    content,
     discord,
+    applications: v2.applications,
+    manualPosts: v2.manualPosts,
+    stats: v2.stats,
+    presence: v2.presence,
+    counter: v2.counter,
+    links: v2.links satisfies AppContext['links'],
   };
-  return { ctx, repos, events, discord, monitor, providers, streamers, sessions };
+  return { ctx, repos, events, discord, monitor, providers, streamers, sessions, v2, content };
 }
 
 /** A publicDir that does not contain a build (default for tests). */

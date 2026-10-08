@@ -10,6 +10,7 @@ import {
   changedFields,
   describeChanges,
   mergeSettings,
+  NOTIFY_ROLE_FIELD,
   SETTING_LABELS_AR,
   toPatch,
   validateDiscordReferences,
@@ -23,7 +24,7 @@ const ROLE_SYNC_FIELDS = new Set(['streamerRoleId', 'liveRoleId', 'options.autoS
 const MONITOR_FIELDS = new Set(['platformsEnabled', 'contentKinds']);
 
 /** ADMIN_USER_IDS, or owner / Administrator / Manage Roles in this guild (from the refreshed session guild list). */
-function mayChangeAssignedRoles(auth: AuthState, guildId: string): boolean {
+export function mayChangeAssignedRoles(auth: AuthState, guildId: string): boolean {
   return auth.isAdmin || auth.session.guilds.some((g) => g.id === guildId && canManageRoles(g));
 }
 
@@ -47,7 +48,9 @@ export function registerSettingsRoutes(g: FastifyInstance, deps: ApiDeps): void 
       throw new HttpError(
         403,
         'forbidden',
-        'تغيير رتبة الستريمر أو رتبة البث المباشر يحتاج صلاحية Manage Roles (أو Administrator أو تكون صاحب السيرفر)، لأن البوت يعطي هذي الرتب ويشيلها تلقائياً',
+        roleField === NOTIFY_ROLE_FIELD
+          ? 'تغيير رتبة الإشعارات يحتاج صلاحية Manage Roles (أو Administrator أو تكون صاحب السيرفر)، لأن الأعضاء ياخذونها من البوت بزر'
+          : 'تغيير رتبة الستريمر أو رتبة البث المباشر يحتاج صلاحية Manage Roles (أو Administrator أو تكون صاحب السيرفر)، لأن البوت يعطي هذي الرتب ويشيلها تلقائياً',
         roleField,
       );
     }
@@ -73,6 +76,10 @@ export function registerSettingsRoutes(g: FastifyInstance, deps: ApiDeps): void 
     }
     const roleRelevant = fields.some((f) => ROLE_SYNC_FIELDS.has(f)) && (saved.streamerRoleId || saved.liveRoleId);
     if (roleRelevant) bestEffort(request, 'Role sync after settings change', () => ctx.sessions.syncRoles(guildId, auth.actor));
+
+    // v2 services react to their settings right away instead of waiting for their next timer.
+    if (fields.some((f) => f.startsWith('features.counter.'))) bestEffort(request, 'Refreshing the live counter', () => ctx.counter?.refresh(guildId));
+    if (fields.some((f) => f.startsWith('features.presence.'))) bestEffort(request, 'Re-syncing presences', () => ctx.presence?.reconcile(guildId));
 
     return toSettingsDto(saved);
   });

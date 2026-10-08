@@ -127,6 +127,109 @@ export const guildOptionsPatchSchema = z.object({
   removeStreamerRoleOnDelete: z.boolean().optional(),
 });
 
+// ───────────────────────────── features (v2) ─────────────────────────────
+
+/** Optional nullable text: blank → null (use the default text). */
+const nullableText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .nullable()
+    .transform((v) => (v !== null && v.trim() !== '' ? v.trim() : null));
+
+/** Map of key → channel id; null/blank values remove the route (fall back to the default channel). */
+const channelRoutes = <K extends string>(keys: readonly [K, ...K[]], keyError: string) =>
+  z
+    .record(z.string(), nullableSnowflake)
+    .superRefine((value, ctx) => {
+      for (const key of Object.keys(value)) {
+        if (!(keys as readonly string[]).includes(key)) ctx.addIssue({ code: 'custom', message: keyError, path: [key] });
+      }
+    })
+    .transform((value) => {
+      const out: Partial<Record<K, string>> = {};
+      for (const [key, id] of Object.entries(value)) if (id) out[key as K] = id;
+      return out;
+    });
+
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Discord channel names are at most 100 characters; {count} is replaced by a short number. */
+export const COUNTER_TEMPLATE_MAX = 90;
+export const DIGEST_MAX_CLIPS = 20;
+
+export const featuresPatchSchema = z.object({
+  notifyRole: z
+    .object({
+      roleId: nullableSnowflake.optional(),
+      pingOnLive: z.boolean().optional(),
+      pingOnContent: z.boolean().optional(),
+      panelChannelId: nullableSnowflake.optional(),
+      panelTitle: nullableText(256).optional(),
+      panelDescription: nullableText(2000).optional(),
+    })
+    .optional(),
+  routing: z
+    .object({
+      liveByPlatform: channelRoutes(PLATFORMS, 'المنصة غير معروفة').optional(),
+      contentByPlatform: channelRoutes(PLATFORMS, 'المنصة غير معروفة').optional(),
+      contentByKind: channelRoutes(CONTENT_KINDS, 'نوع المقطع غير معروف').optional(),
+    })
+    .optional(),
+  clips: z
+    .object({
+      minViews: z.number().int().min(0).max(100_000_000).optional(),
+      featuredOnly: z.boolean().optional(),
+      mode: z.enum(['each', 'digest'], { error: 'نوع الكليبات غير معروف' }).optional(),
+      digestHour: z.number().int().min(0).max(23).optional(),
+      digestMax: z.number().int().min(1).max(DIGEST_MAX_CLIPS).optional(),
+      digestChannelId: nullableSnowflake.optional(),
+    })
+    .optional(),
+  counter: z
+    .object({
+      channelId: nullableSnowflake.optional(),
+      template: z
+        .preprocess(trimmed, z.string().min(1).max(COUNTER_TEMPLATE_MAX))
+        .refine((v) => v.includes('{count}'), 'اسم روم العداد لازم يحتوي {count}')
+        .optional(),
+    })
+    .optional(),
+  applications: z
+    .object({
+      enabled: z.boolean().optional(),
+      panelChannelId: nullableSnowflake.optional(),
+      reviewChannelId: nullableSnowflake.optional(),
+      panelTitle: nullableText(256).optional(),
+      panelDescription: nullableText(2000).optional(),
+      dmApplicant: z.boolean().optional(),
+    })
+    .optional(),
+  silent: z.object({ live: z.boolean().optional(), content: z.boolean().optional() }).optional(),
+  linking: z.object({ enabled: z.boolean().optional() }).optional(),
+  manualPosts: z.object({ enabled: z.boolean().optional() }).optional(),
+  presence: z
+    .object({
+      enabled: z.boolean().optional(),
+      scope: z.enum(['registered', 'everyone'], { error: 'نطاق الكشف غير معروف' }).optional(),
+      notify: z.boolean().optional(),
+    })
+    .optional(),
+  language: z.enum(['ar', 'en'], { error: 'اللغة غير معروفة' }).optional(),
+  timezone: z
+    .preprocess(trimmed, z.string().min(1).max(64))
+    .refine(isValidTimezone, 'المنطقة الزمنية غير صحيحة (مثال: Asia/Riyadh)')
+    .optional(),
+});
+export type FeaturesPatchInput = z.output<typeof featuresPatchSchema>;
+
 export const settingsUpdateSchema = z.object({
   streamerRoleId: nullableSnowflake.optional(),
   liveRoleId: nullableSnowflake.optional(),
@@ -139,6 +242,7 @@ export const settingsUpdateSchema = z.object({
   contentKinds: uniqueList(contentKindSchema, CONTENT_KINDS.length * 2).optional(),
   templates: templatesSchema.optional(),
   options: guildOptionsPatchSchema.optional(),
+  features: featuresPatchSchema.optional(),
 });
 export type SettingsUpdateInput = z.output<typeof settingsUpdateSchema>;
 
@@ -167,11 +271,43 @@ export const createStreamerSchema = z.object({
   accounts: z.array(accountInputSchema).max(50).default([]),
 });
 
+/**
+ * #5 — per-streamer overrides: an empty string is a real override ("render this part empty"), a missing field
+ * inherits the guild template. Specs with no fields are dropped (= no override for that type).
+ */
+const streamerTemplateText = (max: number) => z.string().max(max).optional();
+export const streamerTemplateSpecSchema = z.object({
+  content: streamerTemplateText(2000),
+  title: streamerTemplateText(256),
+  description: streamerTemplateText(4096),
+  footer: streamerTemplateText(2048),
+  color: color.nullable().optional(),
+});
+export const streamerTemplatesSchema = z
+  .object({
+    live: streamerTemplateSpecSchema.optional(),
+    summary: streamerTemplateSpecSchema.optional(),
+    content: streamerTemplateSpecSchema.optional(),
+  })
+  .transform((t) => {
+    const out: Partial<Record<'live' | 'summary' | 'content', z.output<typeof streamerTemplateSpecSchema>>> = {};
+    for (const key of ['live', 'summary', 'content'] as const) {
+      const spec = t[key];
+      if (!spec) continue;
+      const clean: z.output<typeof streamerTemplateSpecSchema> = {};
+      for (const field of ['content', 'title', 'description', 'footer'] as const) if (spec[field] !== undefined) clean[field] = spec[field];
+      if (spec.color != null) clean.color = spec.color;
+      if (Object.keys(clean).length > 0) out[key] = clean;
+    }
+    return out;
+  });
+
 export const updateStreamerSchema = z.object({
   displayName: z.preprocess(trimmed, z.string().min(1, 'اكتب اسم الستريمر').max(64)).optional(),
   notes: z.string().max(500).nullable().optional(),
   color: color.nullable().optional(),
   enabled: z.boolean().optional(),
+  templates: streamerTemplatesSchema.optional(),
 });
 
 export const updateAccountSchema = z.object(accountFlags);
@@ -195,4 +331,80 @@ export const previewTemplateSpecSchema = z.object({
   footer: previewText(2048),
   color: color.nullable().optional(),
 });
-export const previewSchema = z.object({ type: messageType, template: previewTemplateSpecSchema.optional() });
+export const previewSchema = z.object({
+  type: messageType,
+  template: previewTemplateSpecSchema.optional(),
+  streamerId: z.number().int().positive('رقم الستريمر غير صحيح').optional(),
+});
+
+// ───────────────────────────── v2 routes ─────────────────────────────
+
+export const linkPlatformParams = streamerParams.extend({ platform: z.enum(['twitch', 'tiktok'], { error: 'المنصة غير معروفة' }) });
+
+export const applicationParams = z.object({ guildId: snowflake, id: z.coerce.number().int().positive('رقم الطلب غير صحيح') });
+export const applicationsQuery = z.object({
+  status: z.enum(['pending', 'approved', 'rejected', 'cancelled'], { error: 'حالة الطلب غير معروفة' }).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  beforeId: z.coerce.number().int().positive().optional(),
+});
+const reviewNote = z
+  .string()
+  .max(500)
+  .nullable()
+  .optional()
+  .transform((v) => (v == null || v.trim() === '' ? null : v.trim()));
+export const approveApplicationSchema = z.object({
+  note: reviewNote,
+  accounts: z.array(accountInputSchema).min(1).max(20).optional(),
+});
+export const rejectApplicationSchema = z.object({ note: reviewNote });
+
+export const panelParams = z.object({ guildId: snowflake, kind: z.enum(['notify', 'apply'], { error: 'نوع اللوحة غير معروف' }) });
+
+const httpUrl = z.preprocess(
+  trimmed,
+  z
+    .string()
+    .min(1)
+    .max(2000)
+    .refine((v) => {
+      try {
+        const u = new URL(v.includes('://') ? v : `https://${v}`);
+        return u.protocol === 'https:' || u.protocol === 'http:';
+      } catch {
+        return false;
+      }
+    }, 'الرابط غير صحيح'),
+);
+const optionalHttpsUrl = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim() === '' ? null : trimmed(v)),
+  z
+    .string()
+    .max(2000)
+    .refine((v) => {
+      try {
+        return new URL(v).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'الرابط غير صحيح')
+    .nullable()
+    .optional(),
+);
+export const manualInspectSchema = z.object({ url: httpUrl });
+export const manualPostSchema = z.object({
+  url: httpUrl,
+  title: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : trimmed(v)), z.string().max(256).nullable().optional()),
+  thumbnailUrl: optionalHttpsUrl,
+  streamerId: z.number().int().positive('رقم الستريمر غير صحيح').nullable().optional(),
+  kind: contentKindSchema.nullable().optional(),
+});
+
+export const sessionParams = z.object({ guildId: snowflake, sessionId: z.coerce.number().int().positive('رقم البث غير صحيح') });
+export const STATS_DAYS = [7, 30, 90, 365] as const;
+export const streamerStatsQuery = z.object({
+  days: z.coerce
+    .number()
+    .refine((d) => (STATS_DAYS as readonly number[]).includes(d), 'المدة لازم تكون 7 أو 30 أو 90 أو 365 يوم')
+    .default(30),
+});

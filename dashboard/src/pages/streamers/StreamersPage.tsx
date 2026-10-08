@@ -22,6 +22,11 @@ import { PLATFORM_META, PLATFORMS, sortPlatforms } from '../../lib/platforms';
 import { filterStreamers, hasIssues, type SortKey, type StatusFilter } from '../../lib/streamers';
 import { AddStreamerModal } from './AddStreamerModal';
 import { StreamerDrawer } from './StreamerDrawer';
+import { t } from '../../i18n';
+
+function withCount(label: string, count: number): string {
+  return count ? `${label} (${count})` : label;
+}
 
 export default function StreamersPage() {
   const { guildId, basePath } = useGuild();
@@ -59,12 +64,12 @@ export default function StreamersPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="الستريمرز"
+        title={t('nav.streamers')}
         icon={<Users className="size-5" />}
-        description={streamers.data ? `${formatNumber(list.length)} ستريمر • ${formatNumber(counts.live)} لايف الحين` : 'الستريمرز المسجلين وحساباتهم'}
+        description={streamers.data ? t('streamers.headerCounts', { count: list.length, live: formatNumber(counts.live) }) : t('streamers.headerDesc')}
         actions={
           <Button variant="primary" onClick={() => setAddOpen(true)} icon={<UserPlus className="size-4" />}>
-            إضافة ستريمر
+            {t('streamers.add')}
           </Button>
         }
       />
@@ -76,20 +81,20 @@ export default function StreamersPage() {
               className="lg:w-80"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="ابحث بالاسم، الآيدي أو اسم الحساب…"
+              placeholder={t('streamers.search')}
               leading={<Search className="size-4" />}
-              aria-label="بحث"
+              aria-label={t('common.search')}
             />
             <Segmented<StatusFilter>
               size="sm"
               value={status}
               onChange={setStatus}
-              ariaLabel="الحالة"
+              ariaLabel={t('streamers.statusFilter')}
               options={[
-                { value: 'all', label: 'الكل' },
-                { value: 'live', label: `لايف${counts.live ? ` (${counts.live})` : ''}` },
-                { value: 'disabled', label: `موقف${counts.disabled ? ` (${counts.disabled})` : ''}` },
-                { value: 'issues', label: `فيه مشاكل${counts.issues ? ` (${counts.issues})` : ''}` },
+                { value: 'all', label: t('common.all') },
+                { value: 'live', label: withCount(t('streamers.filter.live'), counts.live) },
+                { value: 'disabled', label: withCount(t('streamers.filter.disabled'), counts.disabled) },
+                { value: 'issues', label: withCount(t('streamers.filter.issues'), counts.issues) },
               ]}
             />
             <div className="flex items-center gap-1.5 lg:ms-auto">
@@ -111,13 +116,13 @@ export default function StreamersPage() {
               <select
                 value={sort}
                 onChange={(e) => setSort(e.target.value as SortKey)}
-                aria-label="الترتيب"
+                aria-label={t('streamers.sort')}
                 className="h-8 rounded-lg bg-zinc-900/70 px-2 text-xs text-zinc-300 ring-1 ring-inset ring-white/[0.08] focus:outline-none focus:ring-violet-500/60"
               >
-                <option value="live">اللايف أولاً</option>
-                <option value="name">الاسم</option>
-                <option value="hours">الأكثر بث</option>
-                <option value="newest">الأحدث إضافة</option>
+                <option value="live">{t('streamers.sort.live')}</option>
+                <option value="name">{t('streamers.sort.name')}</option>
+                <option value="hours">{t('streamers.sort.hours')}</option>
+                <option value="newest">{t('streamers.sort.newest')}</option>
               </select>
             </div>
           </div>
@@ -136,18 +141,18 @@ export default function StreamersPage() {
         <Card>
           <EmptyState
             icon={<Users className="size-6" />}
-            title="ما فيه ستريمرز للحين"
-            description="أضف الستريمر بآيدي الديسكورد حقه وحساباته في تويتش وكيك ويوتيوب وتيك توك، والبوت يتكفل بالباقي: الرتب، إشعارات البث والمقاطع."
+            title={t('streamers.emptyTitle')}
+            description={t('streamers.emptyDesc')}
             action={
               <Button variant="primary" onClick={() => setAddOpen(true)} icon={<UserPlus className="size-4" />}>
-                إضافة أول ستريمر
+                {t('streamers.addFirst')}
               </Button>
             }
           />
         </Card>
       ) : visible.length === 0 ? (
         <Card>
-          <EmptyState compact icon={<Search className="size-5" />} title="ما فيه نتائج" description="جرّب كلمة ثانية أو غيّر الفلاتر." />
+          <EmptyState compact icon={<Search className="size-5" />} title={t('common.noResults')} description={t('streamers.noResultsDesc')} />
         </Card>
       ) : (
         <Card className="divide-y divide-white/[0.05] overflow-hidden">
@@ -197,52 +202,52 @@ function StreamerRow({ streamer, onOpen }: { streamer: StreamerDto; onOpen: () =
 
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <p className="truncate font-medium text-zinc-100">{streamer.displayName}</p>
+          <p className="truncate font-medium text-zinc-100" dir="auto">{streamer.displayName}</p>
           {streamer.inGuild === false && (
-            <span title="طلع من السيرفر">
+            <span title={t('streamers.leftGuild')}>
               <UserRoundX className="size-4 shrink-0 text-amber-400" />
             </span>
           )}
           {errors > 0 && (
-            <span title={`${errors} حساب فيه خطأ`}>
+            <span title={t('streamers.accountErrors', { count: errors })}>
               <TriangleAlert className="size-4 shrink-0 text-rose-400" />
             </span>
           )}
         </div>
-        <p dir="ltr" className="truncate text-end font-mono text-[11px] text-zinc-600">
+        <p dir="ltr" className="truncate text-right font-mono ltr:text-left text-[11px] text-zinc-600">
           {streamer.discordUserId}
         </p>
       </div>
 
       <div className="col-span-3 col-start-1 row-start-2 flex flex-wrap gap-1.5 md:col-span-1 md:col-start-auto md:row-start-auto">
         {accounts.length === 0 ? (
-          <Badge tone="warning">بدون حسابات</Badge>
+          <Badge tone="warning">{t('streamers.noAccounts')}</Badge>
         ) : (
           accounts.map((a) => <PlatformBadge key={a.id} platform={a.platform} live={a.isLive} viewers={a.snapshot?.viewers} label={a.displayName} title={a.handle} />)
         )}
       </div>
 
       <div className="hidden text-[12px] text-zinc-500 md:block">
-        <span className="tabular-nums text-zinc-300">{formatNumber(streamer.stats.sessions30d)}</span> بث •{' '}
+        <span className="tabular-nums text-zinc-300">{formatNumber(streamer.stats.sessions30d)}</span> {t('streamers.streamsUnit', { count: streamer.stats.sessions30d })} •{' '}
         <span className="tabular-nums text-zinc-300">{formatHours(streamer.stats.hours30d)}</span>
         {streamer.stats.peakViewers30d > 0 && (
           <>
             {' '}
-            • ذروة <span className="tabular-nums text-zinc-300">{formatCompact(streamer.stats.peakViewers30d)}</span>
+            • {t('streamers.peakWord')} <span className="tabular-nums text-zinc-300">{formatCompact(streamer.stats.peakViewers30d)}</span>
           </>
         )}
-        <p className="text-[11px] text-zinc-600">آخر 30 يوم</p>
+        <p className="text-[11px] text-zinc-600">{t('streamers.last30')}</p>
       </div>
 
       <div onClick={(e) => e.stopPropagation()} className="col-start-3 row-start-1 md:col-start-auto md:row-start-auto">
         <Switch
           checked={streamer.enabled}
           onChange={(enabled) => update.mutate({ id: streamer.id, body: { enabled } })}
-          label={streamer.enabled ? 'إيقاف المراقبة' : 'تفعيل المراقبة'}
+          label={streamer.enabled ? t('streamers.disable') : t('streamers.enable')}
         />
       </div>
 
-      <ChevronLeft className="hidden size-4 text-zinc-600 transition-transform group-hover:-translate-x-0.5 group-hover:text-zinc-300 md:block" />
+      <ChevronLeft className="hidden size-4 text-zinc-600 transition-transform group-hover:text-zinc-300 md:block ltr:rotate-180 rtl:group-hover:-translate-x-0.5 ltr:group-hover:translate-x-0.5" />
     </div>
   );
 }

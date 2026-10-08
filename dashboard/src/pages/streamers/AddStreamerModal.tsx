@@ -19,6 +19,7 @@ import { extractSnowflake, isSnowflake } from '../../lib/discord';
 import { PLATFORM_META, PLATFORMS } from '../../lib/platforms';
 import { toast } from '../../lib/toast';
 import { ContentKindsOverride, isBlockingResolve, PlatformPicker, ResolveStatusView, useResolveState, type ResolveStatus } from './accountParts';
+import { t } from '../../i18n';
 
 const MAX_ACCOUNTS = 12;
 
@@ -95,14 +96,14 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
 
   const submitHint = memberBlocks
     ? memberState.kind === 'checking'
-      ? 'نتحقق من العضو…'
-      : 'حط آيدي عضو صحيح'
+      ? t('add.checkingMember')
+      : t('add.enterValidId')
     : filledRows.length === 0
-      ? 'أضف حساب واحد على الأقل'
+      ? t('add.atLeastOne')
       : blockingRow
         ? statuses[blockingRow.key] === 'typing' || statuses[blockingRow.key] === 'checking'
-          ? 'نتحقق من الحسابات…'
-          : `صحّح حساب ${PLATFORM_META[blockingRow.platform].label}`
+          ? t('add.checkingAccounts')
+          : t('add.fixAccount', { platform: PLATFORM_META[blockingRow.platform].label })
         : null;
 
   const updateRow = (key: number, patch: Partial<AccountRow>): void => {
@@ -129,12 +130,12 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
       },
       {
         onSuccess: (streamer) => {
-          const roleNote = settings.data?.options.autoStreamerRole && settings.data.streamerRoleId ? 'وانعطى رتبة الستريمر' : undefined;
-          toast.success(`تمت إضافة ${streamer.displayName}`, { description: roleNote });
+          const roleNote = settings.data?.options.autoStreamerRole && settings.data.streamerRoleId ? t('add.roleGiven') : undefined;
+          toast.success(t('add.added', { name: streamer.displayName }), { description: roleNote });
           onCreated(streamer);
         },
         onError: (error) => {
-          const message = isApiError(error) ? error.message : 'ما قدرنا نضيف الستريمر';
+          const message = isApiError(error) ? error.message : t('add.failed');
           const field = isApiError(error) ? error.field : undefined;
           const index = field ? /^accounts\.(\d+)/.exec(field)?.[1] : undefined;
           setServerError({ field, message, rowKey: index !== undefined ? submitted[Number(index)]?.key : undefined });
@@ -152,16 +153,16 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
       onClose={onClose}
       dismissible={!create.isPending}
       icon={<UserPlus className="size-5" />}
-      title="إضافة ستريمر"
-      description="حط آيدي الديسكورد حقه وحساباته في المنصات. البوت يتأكد من كل حساب قبل الحفظ."
+      title={t('streamers.add')}
+      description={t('add.desc')}
       footer={
         <>
           {submitHint && <span className="me-auto text-xs text-zinc-500">{submitHint}</span>}
           <Button variant="ghost" onClick={onClose} disabled={create.isPending}>
-            إلغاء
+            {t('common.cancel')}
           </Button>
           <Button variant="primary" onClick={submit} disabled={!canSubmit} loading={create.isPending} icon={<UserPlus className="size-4" />}>
-            إضافة الستريمر
+            {t('add.submit')}
           </Button>
         </>
       }
@@ -175,10 +176,10 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
-            label="آيدي الديسكورد"
+            label={t('add.discordId')}
             htmlFor="add-user-id"
-            hint="كليك يمين على العضو ← Copy User ID (لازم Developer Mode). تقدر تلصق منشن بعد."
-            error={serverError?.field === 'discordUserId' ? serverError.message : memberState.kind === 'invalid' ? 'الآيدي لازم يكون رقم من 17 إلى 20 خانة' : null}
+            hint={t('add.discordIdHint')}
+            error={serverError?.field === 'discordUserId' ? serverError.message : memberState.kind === 'invalid' ? t('settings.err.snowflake') : null}
           >
             <Input
               id="add-user-id"
@@ -196,13 +197,13 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
               className="font-mono"
             />
           </Field>
-          <Field label="الاسم المعروض" htmlFor="add-display-name" hint="اختياري، الافتراضي اسمه في السيرفر.">
+          <Field label={t('add.displayName')} htmlFor="add-display-name" hint={t('add.displayNameHint')}>
             <Input
               id="add-display-name"
               value={displayName}
               maxLength={64}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder={memberState.kind === 'ok' ? memberState.member.displayName : 'اسم الستريمر'}
+              placeholder={memberState.kind === 'ok' ? memberState.member.displayName : t('add.displayNamePlaceholder')}
             />
           </Field>
         </div>
@@ -211,8 +212,8 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-zinc-200">الحسابات</h3>
-            <span className="text-xs text-zinc-500">اترك اللي ما عنده فاضي</span>
+            <h3 className="text-sm font-semibold text-zinc-200">{t('add.accounts')}</h3>
+            <span className="text-xs text-zinc-500">{t('add.accountsHint')}</span>
           </div>
           {rows.map((row) => (
             <AccountRowEditor
@@ -233,17 +234,17 @@ function AddStreamerForm({ onClose, onCreated }: Omit<AddStreamerModalProps, 'op
             disabled={rows.length >= MAX_ACCOUNTS}
             onClick={() => setRows((list) => [...list, newRow('twitch', true)])}
           >
-            حساب إضافي
+            {t('add.extraAccount')}
           </Button>
         </div>
 
         <div>
           <button type="button" onClick={() => setShowMore((v) => !v)} className="flex items-center gap-1.5 text-[13px] text-zinc-400 hover:text-zinc-200" aria-expanded={showMore}>
             <ChevronDown className={cn('size-4 transition-transform', showMore && 'rotate-180')} />
-            ملاحظات (اختياري)
+            {t('add.notes')}
           </button>
           {showMore && (
-            <Textarea className="mt-2" rows={2} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="ملاحظات خاصة للمشرفين، ما تظهر في الإشعارات" />
+            <Textarea className="mt-2" rows={2} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={t('add.notesPlaceholder')} />
           )}
         </div>
 
@@ -282,7 +283,7 @@ function MemberPreview({ state }: { state: MemberState }) {
     return (
       <div className="flex items-center gap-2 rounded-xl bg-white/[0.03] p-3 text-[13px] text-zinc-400 ring-1 ring-inset ring-white/[0.06]">
         <Spinner className="size-4" />
-        نبحث عن العضو في السيرفر…
+        {t('add.searchingMember')}
       </div>
     );
   }
@@ -290,7 +291,7 @@ function MemberPreview({ state }: { state: MemberState }) {
     return (
       <div className="flex items-center gap-2 rounded-xl bg-rose-500/[0.07] p-3 text-[13px] text-rose-200 ring-1 ring-inset ring-rose-500/20">
         <UserRoundX className="size-4 shrink-0" />
-        هذا العضو مو موجود في السيرفر، تأكد من الآيدي.
+        {t('add.memberNotFound')}
       </div>
     );
   }
@@ -298,7 +299,7 @@ function MemberPreview({ state }: { state: MemberState }) {
     return (
       <div className="flex items-start gap-2 rounded-xl bg-amber-500/[0.07] p-3 text-[13px] text-amber-100/90 ring-1 ring-inset ring-amber-500/20">
         <Info className="mt-0.5 size-4 shrink-0 text-amber-300" />
-        {state.message ?? 'ما قدرنا نتحقق من العضو الحين'}. تقدر تكمل، والبوت بيحاول يتحقق وقت الحفظ.
+        {t('add.memberUnverified', { reason: state.message ?? t('add.memberCheckFailed') })}
       </div>
     );
   }
@@ -313,21 +314,21 @@ function MemberPreview({ state }: { state: MemberState }) {
       <Avatar src={member.avatarUrl} name={member.displayName} size={40} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-zinc-100">{member.displayName}</p>
-        <p dir="ltr" className="truncate text-end text-xs text-zinc-500">
+        <p dir="ltr" className="truncate text-right text-xs ltr:text-left text-zinc-500">
           @{member.username}
         </p>
       </div>
       {state.kind === 'ok' && (
         <Badge tone="success">
           <UserRoundCheck className="size-3" />
-          عضو في السيرفر
+          {t('add.inGuild')}
         </Badge>
       )}
-      {state.kind === 'exists' && <Badge tone="danger">مسجّل كستريمر من قبل</Badge>}
+      {state.kind === 'exists' && <Badge tone="danger">{t('add.alreadyStreamer')}</Badge>}
       {state.kind === 'bot' && (
         <Badge tone="danger">
           <Bot className="size-3" />
-          حساب بوت
+          {t('add.botAccount')}
         </Badge>
       )}
     </div>
@@ -369,7 +370,7 @@ function AccountRowEditor({
         <div className="mb-3 flex items-center justify-between gap-2">
           <PlatformPicker value={row.platform} onChange={(platform) => onChange({ platform, contentKinds: null })} />
           {onRemove && (
-            <button type="button" onClick={onRemove} aria-label="حذف الحساب" className="grid size-8 place-items-center rounded-lg text-zinc-500 hover:bg-rose-500/10 hover:text-rose-300">
+            <button type="button" onClick={onRemove} aria-label={t('add.removeAccount')} className="grid size-8 place-items-center rounded-lg text-zinc-500 hover:bg-rose-500/10 hover:text-rose-300">
               <Trash2 className="size-4" />
             </button>
           )}
@@ -378,9 +379,9 @@ function AccountRowEditor({
       <div className="flex items-center gap-3">
         <PlatformTile platform={row.platform} />
         <Input
-          aria-label={`حساب ${meta.label}`}
-          // Handles/URLs are LTR, but the Arabic placeholder must read right-to-left.
-          dir={row.input ? 'ltr' : 'rtl'}
+          aria-label={t('add.accountAria', { platform: meta.label })}
+          // Handles/URLs are LTR; the (translated) placeholder follows the page direction.
+          dir={row.input ? 'ltr' : undefined}
           autoComplete="off"
           spellCheck={false}
           maxLength={300}
@@ -401,19 +402,19 @@ function AccountRowEditor({
           ) : (
             <ResolveStatusView state={state} compact />
           )}
-          {platformDisabled && <p className="text-xs text-amber-300/90">منصة {meta.label} مقفلة في الإعدادات، الحساب بينحفظ بس ما راح ينراقب لين تفعّلها.</p>}
+          {platformDisabled && <p className="text-xs text-amber-300/90">{t('add.platformDisabled', { platform: meta.label })}</p>}
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-zinc-300">
             <label className="flex items-center gap-2">
-              <Switch size="sm" checked={row.notifyLive} onChange={(v) => onChange({ notifyLive: v })} label="إشعار البث" />
-              إشعار البث
+              <Switch size="sm" checked={row.notifyLive} onChange={(v) => onChange({ notifyLive: v })} label={t('accounts.notifyLive')} />
+              {t('accounts.notifyLive')}
             </label>
             <label className="flex items-center gap-2">
-              <Switch size="sm" checked={row.notifyContent} onChange={(v) => onChange({ notifyContent: v })} label="إشعار المقاطع" />
-              إشعار المقاطع
+              <Switch size="sm" checked={row.notifyContent} onChange={(v) => onChange({ notifyContent: v })} label={t('accounts.notifyContent')} />
+              {t('accounts.notifyContent')}
             </label>
             {row.notifyContent && (
               <button type="button" onClick={() => setShowKinds((v) => !v)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300" aria-expanded={showKinds}>
-                أنواع المقاطع: {row.contentKinds === null ? 'حسب السيرفر' : 'مخصص'}
+                {t('accounts.kindsLabel', { mode: row.contentKinds === null ? t('accounts.byServer') : t('tpl.custom') })}
                 <ChevronDown className={cn('size-3.5 transition-transform', showKinds && 'rotate-180')} />
               </button>
             )}

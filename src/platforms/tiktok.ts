@@ -29,7 +29,7 @@ import { ChannelNotFoundError, ProviderError, RateLimitedError, ValidationError,
 import type { Logger } from '../core/logger.js';
 import { offlineSnapshot, type ChannelRef, type ContentItem, type ContentKind, type LiveSnapshot, type ResolvedChannel } from '../core/types.js';
 import { HttpClient, type FetchLike } from './http.js';
-import type { KeyValueStore, PlatformProvider, ProviderCapabilities, ProviderContext, ProviderFactory, ProviderHealth } from './types.js';
+import type { KeyValueStore, LinkedTokenSource, PlatformProvider, ProviderCapabilities, ProviderContext, ProviderFactory, ProviderHealth } from './types.js';
 
 // ───────────────────────────── constants ─────────────────────────────
 
@@ -650,6 +650,26 @@ const EMPTY_ROOM: RoomState = {
   categoryImageUrl: null,
 };
 
+const DISPLAY_API_VIDEO_LIST = 'https://open.tiktokapis.com/v2/video/list/';
+const DISPLAY_API_VIDEO_FIELDS = 'id,create_time,title,video_description,cover_image_url,share_url,duration,view_count';
+const OFFICIAL_TIMEOUT_MS = 15_000;
+
+interface DisplayVideoListResponse {
+  data?: {
+    videos?: Array<{
+      id?: string | number;
+      create_time?: number;
+      title?: string;
+      video_description?: string;
+      cover_image_url?: string;
+      share_url?: string;
+      duration?: number;
+      view_count?: number;
+    }>;
+  };
+  error?: { code?: string; message?: string };
+}
+
 interface RawVideo {
   id: string;
   desc: string | null;
@@ -1003,6 +1023,7 @@ export class TikTokProvider implements PlatformProvider {
   private readonly euler: EulerClient | null;
   private readonly rsshubUrl: string | null;
   private readonly kv: SafeKv;
+  private readonly links: LinkedTokenSource | null;
   private readonly lastLiveAt = new Map<string, number>();
   private readonly neverLiveCheckedAt = new Map<string, number>();
   private readonly oembedCache = new Map<string, { title: string | null; thumbnailUrl: string | null }>();
@@ -1024,6 +1045,7 @@ export class TikTokProvider implements PlatformProvider {
     const throttle = new Throttle(minGap, maxGap, this.now, options.random ?? Math.random, options.sleep ?? sleepMs);
 
     this.kv = new SafeKv(ctx.kv, this.logger);
+    this.links = ctx.links ?? null;
     this.breaker = new BlockBreaker(this.kv, this.now, this.logger);
     this.loadLastLive();
     this.web = new TikTokWeb(this.fetchImpl, throttle, this.breaker);
@@ -1351,6 +1373,8 @@ export class TikTokProvider implements PlatformProvider {
   async fetchRecentContent(channel: ChannelRef, kinds: ContentKind[]): Promise<ContentItem[]> {
     if (!kinds.includes('video')) return [];
     const handle = this.handleOf(channel);
+    const official = await this.fetchOfficial(channel, handle);
+    if (official) return official;
     const failures: string[] = [];
     let paused = this.breaker.isOpen();
 
@@ -1394,6 +1418,67 @@ export class TikTokProvider implements PlatformProvider {
     const message = `Could not list TikTok videos for @${handle} (${failures.join('; ')})`;
     this.lastContentError = message;
     throw new ProviderError('tiktok', message, true);
+  }
+
+  /**
+   * #11 — linked accounts: list videos through the official Display API (video.list). Returns null when the account
+   * isn't linked or the official call fails for any reason, so the caller falls back to the unofficial path.
+   */
+  private async fetchOfficial(channel: ChannelRef, handle: string): Promise<ContentItem[] | null> {
+    if (!this.links) return null;
+    let token: { accessToken: string; openId: string } | null;
+    try {
+      token = await this.links.tiktokAccessToken(handle);
+    } catch (err) {
+      this.logger.debug({ handle, err: errorMessage(err) }, 'TikTok linked token lookup failed');
+      return null;
+    }
+    if (!token?.accessToken) return null;
+    try {
+      const res = await this.fetchImpl(`${DISPLAY_API_VIDEO_LIST}?fields=${DISPLAY_API_VIDEO_FIELDS}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token.accessToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ max_count: MAX_VIDEOS }),
+        signal: AbortSignal.timeout(OFFICIAL_TIMEOUT_MS),
+      });
+      const body = (await res.json().catch(() => null)) as DisplayVideoListResponse | null;
+      const code = body?.error?.code;
+      if (!res.ok || !body || (code !== undefined && code !== 'ok')) {
+        throw new Error(`HTTP ${res.status}${code ? ` (${code})` : ''}`);
+      }
+      const videos = Array.isArray(body.data?.videos) ? body.data.videos : [];
+      const items: ContentItem[] = [];
+      const seen = new Set<string>();
+      for (const v of videos) {
+        const id = typeof v?.id === 'string' || typeof v?.id === 'number' ? String(v.id) : null;
+        if (!id || !/^\d{5,30}$/.test(id) || seen.has(id)) continue;
+        seen.add(id);
+        const published =
+          typeof v.create_time === 'number' && v.create_time > 0 ? new Date(v.create_time * 1000) : tiktokIdToDate(id);
+        if (!published || Number.isNaN(published.getTime())) continue;
+        const title = cleanTitle(typeof v.title === 'string' && v.title.trim() ? v.title : typeof v.video_description === 'string' ? v.video_description : null);
+        items.push({
+          platform: 'tiktok',
+          platformId: channel.platformId,
+          contentId: id,
+          kind: 'video',
+          title: title ?? DEFAULT_VIDEO_TITLE,
+          url: videoUrl(handle, id),
+          thumbnailUrl: typeof v.cover_image_url === 'string' && v.cover_image_url ? v.cover_image_url : null,
+          publishedAt: published.toISOString(),
+          durationSec: typeof v.duration === 'number' ? Math.round(v.duration) : null,
+          viewCount: typeof v.view_count === 'number' ? v.view_count : null,
+          relatedStreamId: null,
+        });
+      }
+      items.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+      this.contentIssues.delete(handle);
+      this.markContentOk();
+      return items.slice(0, MAX_VIDEOS);
+    } catch (err) {
+      this.warnOnce(`official:${handle}`, { handle, err: errorMessage(err) }, 'TikTok official video.list failed; falling back to the public pages');
+      return null;
+    }
   }
 
   private async toContent(channel: ChannelRef, handle: string, videos: RawVideo[]): Promise<ContentItem[]> {

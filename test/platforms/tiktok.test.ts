@@ -845,3 +845,65 @@ describe('fetchRecentContent', () => {
     expect((error as ProviderError).retryable).toBe(true);
   });
 });
+
+describe('official Display API for linked accounts (#11)', () => {
+  const VIDEO_LIST = 'https://open.tiktokapis.com/v2/video/list/';
+  const linked = (token: { accessToken: string; openId: string } | null | Error) => ({
+    calls: [] as string[],
+    async tiktokAccessToken(handle: string) {
+      this.calls.push(handle);
+      if (token instanceof Error) throw token;
+      return token;
+    },
+  });
+  const setupLinked = (links: ReturnType<typeof linked>) =>
+    new TikTokProvider(
+      { config: loadConfig(baseEnv), logger, kv, fetch: server.fetch, links },
+      { now: () => clock, minRequestGapMs: 0, maxRequestGapMs: 0 },
+    );
+
+  it('lists videos via video.list with the bearer token, newest first', async () => {
+    server.on(VIDEO_LIST, () =>
+      json({
+        data: {
+          videos: [
+            { id: VID_2H, create_time: Date.parse('2026-10-03T10:00:00Z') / 1000, title: '', video_description: ' older  one ', cover_image_url: 'https://c/2.jpg', duration: 15, view_count: 7 },
+            { id: VID_1H, create_time: Date.parse('2026-10-03T11:00:00Z') / 1000, title: 'Newest', duration: 30.4, view_count: 99 },
+            { id: 'bad' },
+          ],
+          has_more: false,
+        },
+        error: { code: 'ok', message: '' },
+      }),
+    );
+    const links = linked({ accessToken: 'tok-1', openId: 'o1' });
+    const items = await setupLinked(links).fetchRecentContent(channel, ['video']);
+    expect(links.calls).toEqual([HANDLE]);
+    expect(items.map((i) => i.contentId)).toEqual([VID_1H, VID_2H]);
+    expect(items[0]).toMatchObject({ title: 'Newest', durationSec: 30, viewCount: 99, url: `https://www.tiktok.com/@streamer.one/video/${VID_1H}`, publishedAt: '2026-10-03T11:00:00.000Z' });
+    expect(items[1]).toMatchObject({ title: 'older one', thumbnailUrl: 'https://c/2.jpg' });
+    const call = server.callsTo(VIDEO_LIST)[0]!;
+    expect(call.method).toBe('POST');
+    expect(call.headers.authorization).toBe('Bearer tok-1');
+    expect(call.url.searchParams.get('fields')).toContain('view_count');
+    expect(server.callsTo(EMBED)).toHaveLength(0);
+  });
+
+  it('falls back to the embed page when the official call fails, the token lookup throws, or the account is not linked', async () => {
+    server
+      .on(VIDEO_LIST, () => json({ data: {}, error: { code: 'access_token_invalid', message: 'x' } }, 401))
+      .on(EMBED, () => html(embedHtml(HANDLE, { userInfo: embedUser, videoList: [embedVideo(VID_1H, 'From embed')] })))
+      .on(OEMBED, () => json({}, 404));
+    for (const links of [linked({ accessToken: 't', openId: 'o' }), linked(new Error('db down')), linked(null)]) {
+      const items = await setupLinked(links).fetchRecentContent(channel, ['video']);
+      expect(items.map((i) => i.title)).toEqual(['From embed']);
+    }
+    expect(server.callsTo(VIDEO_LIST)).toHaveLength(1);
+  });
+
+  it('does not call the token source when videos are not wanted', async () => {
+    const links = linked({ accessToken: 't', openId: 'o' });
+    expect(await setupLinked(links).fetchRecentContent(channel, ['clip'])).toEqual([]);
+    expect(links.calls).toEqual([]);
+  });
+});

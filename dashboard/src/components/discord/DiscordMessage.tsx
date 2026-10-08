@@ -47,7 +47,7 @@ export function DiscordMessage({ message, author, resolver, timestamp, className
           <div className="flex flex-wrap items-center gap-x-1.5">
             <span className="font-medium text-white">{author.name}</span>
             <span className="inline-flex h-[15px] items-center rounded-[3px] bg-blurple px-1 text-[10px] font-semibold uppercase leading-none text-white">APP</span>
-            <span dir="rtl" className="text-xs text-discord-muted">
+            <span dir="auto" className="text-xs text-discord-muted">
               {formatCalendar(now, now)}
             </span>
           </div>
@@ -128,7 +128,7 @@ function EmbedView({ embed, resolver, now }: { embed: Embed; resolver?: MentionR
             <span>
               {embed.footer && <DiscordMarkdown text={embed.footer.text} inline />}
               {embed.footer && embed.timestamp && <span className="mx-1">•</span>}
-              {embed.timestamp && <span dir="rtl">{formatCalendar(embed.timestamp, now)}</span>}
+              {embed.timestamp && <span dir="auto">{formatCalendar(embed.timestamp, now)}</span>}
             </span>
           </div>
         )}

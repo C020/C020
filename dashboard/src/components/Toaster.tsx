@@ -2,6 +2,7 @@ import { CircleCheck, CircleX, Info, Radio, TriangleAlert, X } from 'lucide-reac
 import { useSyncExternalStore } from 'react';
 import { cn } from '../lib/cn';
 import { dismissToast, holdToast, releaseToast, toastStore, type Toast, type ToastTone } from '../lib/toast';
+import { t } from '../i18n';
 
 const TONE_STYLES: Record<ToastTone, { icon: typeof Info; className: string }> = {
   success: { icon: CircleCheck, className: 'text-emerald-300' },
@@ -14,7 +15,7 @@ const TONE_STYLES: Record<ToastTone, { icon: typeof Info; className: string }> =
 export function Toaster() {
   const toasts = useSyncExternalStore(toastStore.subscribe, toastStore.get);
   return (
-    <div aria-live="polite" className="pointer-events-none fixed bottom-0 left-0 right-0 z-[60] flex flex-col items-center gap-2 p-4 sm:left-2 sm:right-auto sm:w-[24rem]">
+    <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 p-4 sm:start-auto sm:end-2 sm:w-[24rem]">
       {toasts.map((t) => (
         <ToastItem key={t.id} toast={t} />
       ))}
@@ -56,7 +57,7 @@ function ToastItem({ toast }: { toast: Toast }) {
             </button>
           ))}
       </div>
-      <button type="button" onClick={() => dismissToast(toast.id)} aria-label="إغلاق" className="grid size-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200">
+      <button type="button" onClick={() => dismissToast(toast.id)} aria-label={t('common.close')} className="grid size-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200">
         <X className="size-3.5" />
       </button>
     </div>

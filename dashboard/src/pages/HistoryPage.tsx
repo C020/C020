@@ -17,6 +17,7 @@ import { Tabs } from '../components/ui/Tabs';
 import { useGuild } from '../hooks/useGuild';
 import { cn } from '../lib/cn';
 import { formatCompact, formatDurationShort, formatHours, formatNumber } from '../lib/format';
+import { t } from '../i18n';
 
 const PAGE_SIZE = 10;
 type Tab = 'sessions' | 'leaderboard';
@@ -33,13 +34,13 @@ export default function HistoryPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="السجل" icon={<History className="size-5" />} description="كل البثوث السابقة مع ملخصاتها، وترتيب الستريمرز" />
+      <PageHeader title={t('nav.history')} icon={<History className="size-5" />} description={t('history.desc')} />
       <Tabs<Tab>
         value={tab}
         onChange={setTab}
         items={[
-          { value: 'sessions', label: 'البثوث', icon: <Radio className="size-4" /> },
-          { value: 'leaderboard', label: 'المتصدرين', icon: <Trophy className="size-4" /> },
+          { value: 'sessions', label: t('history.sessions'), icon: <Radio className="size-4" /> },
+          { value: 'leaderboard', label: t('history.leaderboard'), icon: <Trophy className="size-4" /> },
         ]}
       />
       {tab === 'sessions' ? <SessionsTab /> : <LeaderboardTab />}
@@ -76,10 +77,10 @@ function SessionsTab() {
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-        <StatCard label="بثوث آخر 30 يوم" value={formatNumber(totals.sessions)} icon={<Radio className="size-5" />} accent="rose" loading={summary.isPending} />
-        <StatCard label="ساعات البث" value={formatHours(totals.hours)} icon={<Clock className="size-5" />} accent="sky" loading={summary.isPending} />
-        <StatCard label="أعلى مشاهدين" value={formatCompact(totals.peak)} icon={<TrendingUp className="size-5" />} accent="amber" loading={summary.isPending} />
-        <StatCard label="ستريمرز نشطين" value={formatNumber(totals.streamers)} icon={<Users className="size-5" />} accent="emerald" loading={summary.isPending} />
+        <StatCard label={t('history.sessions30d')} value={formatNumber(totals.sessions)} icon={<Radio className="size-5" />} accent="rose" loading={summary.isPending} />
+        <StatCard label={t('history.hours')} value={formatHours(totals.hours)} icon={<Clock className="size-5" />} accent="sky" loading={summary.isPending} />
+        <StatCard label={t('session.peak')} value={formatCompact(totals.peak)} icon={<TrendingUp className="size-5" />} accent="amber" loading={summary.isPending} />
+        <StatCard label={t('history.activeStreamers')} value={formatNumber(totals.streamers)} icon={<Users className="size-5" />} accent="emerald" loading={summary.isPending} />
       </div>
 
       {sessions.isPending ? (
@@ -94,7 +95,7 @@ function SessionsTab() {
         </Card>
       ) : sessions.data.items.length === 0 ? (
         <Card>
-          <EmptyState icon={<History className="size-6" />} title={page > 0 ? 'ما فيه بثوث في هذي الصفحة' : 'ما فيه بثوث مسجلة للحين'} description="أول ما يخلص أي ستريمر بثه، بيطلع ملخصه هنا." />
+          <EmptyState icon={<History className="size-6" />} title={page > 0 ? t('history.emptyPage') : t('history.emptyAll')} description={t('history.emptyDesc')} />
         </Card>
       ) : (
         <div className={cn('space-y-4 transition-opacity', sessions.isPlaceholderData && 'opacity-60')}>
@@ -106,15 +107,15 @@ function SessionsTab() {
 
       {total > PAGE_SIZE && (
         <div className="flex items-center justify-between gap-3">
-          <Button variant="secondary" size="sm" disabled={page === 0} onClick={() => goTo(page - 1)} icon={<ChevronRight className="size-4" />}>
-            الأحدث
+          <Button variant="secondary" size="sm" disabled={page === 0} onClick={() => goTo(page - 1)} icon={<ChevronRight className="size-4 ltr:rotate-180" />}>
+            {t('history.newer')}
           </Button>
           <span className="text-[13px] tabular-nums text-zinc-400">
-            صفحة {formatNumber(page + 1)} من {formatNumber(pages)}
+            {t('history.pageOf', { page: formatNumber(page + 1), pages: formatNumber(pages) })}
           </span>
           <Button variant="secondary" size="sm" disabled={page + 1 >= pages} onClick={() => goTo(page + 1)}>
-            الأقدم
-            <ChevronLeft className="size-4" />
+            {t('history.older')}
+            <ChevronLeft className="size-4 ltr:rotate-180" />
           </Button>
         </div>
       )}
@@ -133,17 +134,17 @@ function LeaderboardTab() {
     <Card className="overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-5 py-4 sm:px-6">
         <div>
-          <h2 className="font-semibold text-zinc-100">ترتيب الستريمرز حسب ساعات البث</h2>
-          <p className="mt-0.5 text-xs text-zinc-500">يشمل كل المنصات، والبثوث المتقطعة القريبة تنحسب بث واحد</p>
+          <h2 className="font-semibold text-zinc-100">{t('history.lbTitle')}</h2>
+          <p className="mt-0.5 text-xs text-zinc-500">{t('history.lbDesc')}</p>
         </div>
         <Segmented<number>
           size="sm"
           value={days}
           onChange={setDays}
           options={[
-            { value: 7, label: '7 أيام' },
-            { value: 30, label: '30 يوم' },
-            { value: 90, label: '90 يوم' },
+            { value: 7, label: t('history.days', { count: 7 }) },
+            { value: 30, label: t('history.days', { count: 30 }) },
+            { value: 90, label: t('history.days', { count: 90 }) },
           ]}
         />
       </div>
@@ -156,7 +157,7 @@ function LeaderboardTab() {
       ) : board.isError && !board.data ? (
         <ErrorState error={board.error} onRetry={() => void board.refetch()} retrying={board.isFetching} />
       ) : rows.length === 0 ? (
-        <EmptyState icon={<Trophy className="size-6" />} title="ما فيه بثوث في هذي الفترة" />
+        <EmptyState icon={<Trophy className="size-6" />} title={t('history.emptyPeriod')} />
       ) : (
         <ol className={cn('divide-y divide-white/[0.05] transition-opacity', board.isPlaceholderData && 'opacity-60')}>
           {rows.map((row, i) => (
@@ -169,8 +170,8 @@ function LeaderboardTab() {
 }
 
 function RankBadge({ rank }: { rank: number }) {
-  if (rank === 1) return <Crown className="size-5 text-amber-300" aria-label="المركز الأول" />;
-  if (rank <= 3) return <Medal className={cn('size-5', rank === 2 ? 'text-zinc-300' : 'text-orange-400')} aria-label={`المركز ${rank}`} />;
+  if (rank === 1) return <Crown className="size-5 text-amber-300" aria-label={t('history.rank', { rank: 1 })} />;
+  if (rank <= 3) return <Medal className={cn('size-5', rank === 2 ? 'text-zinc-300' : 'text-orange-400')} aria-label={t('history.rank', { rank })} />;
   return <span className="text-sm font-semibold tabular-nums text-zinc-500">{rank}</span>;
 }
 
@@ -193,8 +194,8 @@ function LeaderboardRow({ row, rank, share }: { row: LeaderboardEntry; rank: num
           />
         </div>
         <div className="mt-1.5 flex gap-3 text-[11.5px] text-zinc-500">
-          <span>{formatNumber(row.sessions)} بث</span>
-          <span>الذروة {formatCompact(row.peakViewers)}</span>
+          <span>{t('history.sessionsCount', { count: row.sessions })}</span>
+          <span>{t('live.peak', { n: formatCompact(row.peakViewers) })}</span>
         </div>
       </div>
     </li>

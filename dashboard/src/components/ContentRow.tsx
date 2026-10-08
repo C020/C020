@@ -3,8 +3,9 @@ import { useState } from 'react';
 import type { ContentDto } from '../api/types';
 import { useNow } from '../hooks/useNow';
 import { formatDateTime, formatRelative } from '../lib/format';
-import { CONTENT_KIND_LABELS_AR, PLATFORM_META } from '../lib/platforms';
+import { CONTENT_KIND_LABELS, PLATFORM_META } from '../lib/platforms';
 import { PlatformIcon } from './PlatformIcon';
+import { t } from '../i18n';
 
 export function ContentRow({ item }: { item: ContentDto }) {
   const now = useNow(60_000);
@@ -26,12 +27,12 @@ export function ContentRow({ item }: { item: ContentDto }) {
       </div>
       <div className="min-w-0 flex-1">
         <p className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-200" dir="auto">
-          {item.title || 'بدون عنوان'}
+          {item.title || t('common.untitled')}
         </p>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-zinc-500">
           <span className="inline-flex items-center gap-1">
             <PlatformIcon platform={item.platform} className="size-3" />
-            {CONTENT_KIND_LABELS_AR[item.kind]}
+            {CONTENT_KIND_LABELS[item.kind]}
           </span>
           {item.streamer && <span className="truncate">{item.streamer.displayName}</span>}
           <span title={formatDateTime(item.publishedAt)}>{formatRelative(item.publishedAt, now)}</span>

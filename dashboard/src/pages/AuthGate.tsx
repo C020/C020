@@ -4,12 +4,14 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { isApiError } from '../api/client';
 import { useMe } from '../api/queries';
 import { DiscordLogo } from '../components/DiscordLogo';
+import { LanguageToggle } from '../components/layout/LanguageToggle';
 import { PlatformIcon } from '../components/PlatformIcon';
 import { Button } from '../components/ui/Button';
 import { ErrorState } from '../components/ui/ErrorState';
 import { Spinner } from '../components/ui/Spinner';
 import { SessionContext } from '../hooks/useSession';
 import { PLATFORMS } from '../lib/platforms';
+import { t } from '../i18n';
 
 /** Resolves the session: splash while loading, login screen when logged out, otherwise the app. */
 export function AuthGate() {
@@ -20,7 +22,7 @@ export function AuthGate() {
       if (isApiError(me.error) && me.error.code === 'dashboard_disabled') return <LoginScreen disabledMessage={me.error.message} />;
       return (
         <CenteredScreen>
-          <ErrorState error={me.error} onRetry={() => void me.refetch()} retrying={me.isFetching} title="ما قدرنا نفتح لوحة التحكم" />
+          <ErrorState error={me.error} onRetry={() => void me.refetch()} retrying={me.isFetching} title={t('auth.loadFailed')} />
         </CenteredScreen>
       );
     }
@@ -69,9 +71,9 @@ function LoginScreen({ disabledMessage }: { disabledMessage?: string }) {
             <Radio className="size-7 text-white" />
             <span className="absolute -end-1 -top-1 size-4 rounded-full bg-rose-500 ring-4 ring-zinc-900" />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">لوحة تحكم بوت البثوث</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-white">{t('auth.title')}</h1>
           <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-zinc-400">
-            تحكم بالستريمرز، إشعارات البث والمقاطع، والرتب التلقائية لكل المنصات من مكان واحد.
+            {t('auth.subtitle')}
           </p>
           <div className="mt-5 flex items-center justify-center gap-3">
             {PLATFORMS.map((p) => (
@@ -85,11 +87,11 @@ function LoginScreen({ disabledMessage }: { disabledMessage?: string }) {
             <div className="mt-7 rounded-2xl bg-amber-500/10 p-4 text-start ring-1 ring-inset ring-amber-500/20">
               <div className="flex items-center gap-2 text-sm font-medium text-amber-200">
                 <Lock className="size-4" />
-                لوحة التحكم مقفلة حالياً
+                {t('auth.locked')}
               </div>
               <p className="mt-1.5 text-[13px] leading-relaxed text-amber-100/80">{disabledMessage}</p>
               <Button size="sm" variant="secondary" className="mt-3" icon={<RefreshCw className="size-3.5" />} onClick={() => window.location.reload()}>
-                تحديث الصفحة
+                {t('common.reload')}
               </Button>
             </div>
           ) : (
@@ -99,14 +101,17 @@ function LoginScreen({ disabledMessage }: { disabledMessage?: string }) {
                 className="mt-7 inline-flex h-12 w-full items-center justify-center gap-2.5 rounded-xl bg-blurple text-[15px] font-semibold text-white shadow-[0_12px_32px_-12px_rgb(88_101_242/0.9)] transition-[background-color,transform] hover:bg-[#4752c4] active:scale-[0.98]"
               >
                 <DiscordLogo className="size-5" />
-                تسجيل الدخول بديسكورد
+                {t('auth.login')}
               </a>
               <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-zinc-500">
                 <ShieldCheck className="size-3.5" />
-                يدخل بس مشرفين السيرفر (Manage Server) أو الأدمن المحددين
+                {t('auth.who')}
               </p>
             </>
           )}
+        </div>
+        <div className="mt-5 flex justify-center">
+          <LanguageToggle />
         </div>
       </div>
     </CenteredScreen>

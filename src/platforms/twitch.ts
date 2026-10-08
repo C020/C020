@@ -149,6 +149,8 @@ interface HelixClip {
   created_at: string;
   thumbnail_url: string;
   duration: number;
+  /** Whether the broadcaster featured the clip (#6 featuredOnly filter). */
+  is_featured?: boolean;
 }
 
 interface TokenResponse {
@@ -854,6 +856,7 @@ export class TwitchProvider implements PlatformProvider {
         durationSec: typeof clip.duration === 'number' ? Math.round(clip.duration) : null,
         viewCount: typeof clip.view_count === 'number' ? clip.view_count : null,
         relatedStreamId: null,
+        featured: typeof clip.is_featured === 'boolean' ? clip.is_featured : null,
       }))
       .sort((a, b) => timeOf(b.publishedAt) - timeOf(a.publishedAt));
   }

@@ -1,6 +1,7 @@
 import { RotateCcw, Save, SlidersHorizontal } from 'lucide-react';
 import { Badge } from './ui/Badge';
 import { Button } from './ui/Button';
+import { t } from '../i18n';
 
 /** Floating "unsaved changes" bar (settings, templates). */
 export function SaveBar({
@@ -10,7 +11,7 @@ export function SaveBar({
   saving,
   onSave,
   onReset,
-  saveLabel = 'حفظ التغييرات',
+  saveLabel = t('save.saveChanges'),
   onShowErrors,
 }: {
   visible: boolean;
@@ -31,17 +32,17 @@ export function SaveBar({
         <p className="flex-1 text-[13px] text-zinc-300">
           {errorCount ? (
             <button type="button" onClick={onShowErrors} disabled={!onShowErrors} className="text-rose-300 underline-offset-4 enabled:hover:underline">
-              فيه {errorCount} حقل يحتاج تصحيح
+              {t('save.fieldErrors', { count: errorCount })}
             </button>
           ) : (
             <>
-              عندك تغييرات ما انحفظت{changeCount ? <Badge className="ms-2">{changeCount}</Badge> : null}
+              {t('save.unsaved')}{changeCount ? <Badge className="ms-2">{changeCount}</Badge> : null}
               <span className="ms-2 hidden text-xs text-zinc-500 sm:inline">Ctrl+S</span>
             </>
           )}
         </p>
         <Button variant="ghost" size="sm" onClick={onReset} disabled={saving} icon={<RotateCcw className="size-3.5" />}>
-          تراجع
+          {t('save.undo')}
         </Button>
         <Button variant="primary" size="sm" onClick={onSave} loading={saving} disabled={!!errorCount} icon={<Save className="size-3.5" />}>
           {saveLabel}

@@ -1,62 +1,102 @@
 import { CONTENT_KIND_LABELS_AR, CONTENT_KINDS, PLATFORM_LABELS, PLATFORMS, type ContentKind, type Platform } from '../../../src/core/types';
 
+import { translatedRecord } from '../i18n/core';
+
 export { CONTENT_KIND_LABELS_AR, CONTENT_KINDS, PLATFORM_LABELS, PLATFORMS };
 export type { ContentKind, Platform };
 
 export interface PlatformMeta {
-  label: string;
+  readonly label: string;
   /** Brand color (hex). */
   color: string;
   /** Readable text color on top of the brand color. */
   onColor: string;
-  placeholder: string;
-  hint: string;
+  /** Translated on read. */
+  readonly placeholder: string;
+  /** Translated on read. */
+  readonly hint: string;
   /** Content kinds this platform can actually produce. */
   contentKinds: ContentKind[];
 }
+
+const PLATFORM_TEXT = translatedRecord({
+  twitchPlaceholder: 'platforms.twitch.placeholder',
+  twitchHint: 'platforms.twitch.hint',
+  kickPlaceholder: 'platforms.kick.placeholder',
+  kickHint: 'platforms.kick.hint',
+  youtubePlaceholder: 'platforms.youtube.placeholder',
+  youtubeHint: 'platforms.youtube.hint',
+  tiktokPlaceholder: 'platforms.tiktok.placeholder',
+  tiktokHint: 'platforms.tiktok.hint',
+});
 
 export const PLATFORM_META: Record<Platform, PlatformMeta> = {
   twitch: {
     label: PLATFORM_LABELS.twitch,
     color: '#9146ff',
     onColor: '#ffffff',
-    placeholder: 'اسم المستخدم أو twitch.tv/…',
-    hint: 'اسم الحساب (login) أو رابط القناة',
+    get placeholder() {
+      return PLATFORM_TEXT[`twitchPlaceholder`];
+    },
+    get hint() {
+      return PLATFORM_TEXT[`twitchHint`];
+    },
     contentKinds: ['vod', 'highlight', 'video', 'clip'],
   },
   kick: {
     label: PLATFORM_LABELS.kick,
     color: '#53fc18',
     onColor: '#0b0f0a',
-    placeholder: 'اسم المستخدم أو kick.com/…',
-    hint: 'الـ slug اللي في رابط القناة',
+    get placeholder() {
+      return PLATFORM_TEXT[`kickPlaceholder`];
+    },
+    get hint() {
+      return PLATFORM_TEXT[`kickHint`];
+    },
     contentKinds: ['vod', 'clip'],
   },
   youtube: {
     label: PLATFORM_LABELS.youtube,
     color: '#ff0000',
     onColor: '#ffffff',
-    placeholder: '@handle أو رابط القناة',
-    hint: '@handle أو رابط القناة أو آيدي يبدأ بـ UC',
+    get placeholder() {
+      return PLATFORM_TEXT[`youtubePlaceholder`];
+    },
+    get hint() {
+      return PLATFORM_TEXT[`youtubeHint`];
+    },
     contentKinds: ['video', 'short', 'vod'],
   },
   tiktok: {
     label: PLATFORM_LABELS.tiktok,
     color: '#fe2c55',
     onColor: '#ffffff',
-    placeholder: '@username أو رابط الحساب',
-    hint: 'اسم المستخدم (بدون أو مع @) أو رابط الحساب',
+    get placeholder() {
+      return PLATFORM_TEXT[`tiktokPlaceholder`];
+    },
+    get hint() {
+      return PLATFORM_TEXT[`tiktokHint`];
+    },
     contentKinds: ['video'],
   },
 };
 
-export const CONTENT_KIND_HINTS: Record<ContentKind, string> = {
-  video: 'فيديو عادي مرفوع (يوتيوب، رفع تويتش، منشور تيك توك)',
-  short: 'مقاطع YouTube Shorts',
-  vod: 'تسجيل بث سابق (VOD / إعادة البث)',
-  highlight: 'هايلايت تويتش',
-  clip: 'كليبات مقصوصة من البث (تويتش وكيك)',
-};
+/** Content kind names in the dashboard language (translated on read). */
+export const CONTENT_KIND_LABELS: Readonly<Record<ContentKind, string>> = translatedRecord({
+  video: 'contentKind.video',
+  short: 'contentKind.short',
+  vod: 'contentKind.vod',
+  highlight: 'contentKind.highlight',
+  clip: 'contentKind.clip',
+});
+
+export const CONTENT_KIND_HINTS: Readonly<Record<ContentKind, string>> = translatedRecord({
+  video: 'contentKind.videoHint',
+  short: 'contentKind.shortHint',
+  vod: 'contentKind.vodHint',
+  highlight: 'contentKind.highlightHint',
+  clip: 'contentKind.clipHint',
+});
 
 /** Rgba string of a platform color, for glows and translucent backgrounds. */
 export function platformAlpha(platform: Platform, alpha: number): string {

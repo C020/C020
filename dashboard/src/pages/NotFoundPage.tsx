@@ -2,16 +2,17 @@ import { Compass, TriangleAlert } from 'lucide-react';
 import { isRouteErrorResponse, Link, useRouteError } from 'react-router-dom';
 import { buttonClasses } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
+import { t } from '../i18n';
 
 export function NotFoundPage() {
   return (
     <EmptyState
       icon={<Compass className="size-6" />}
-      title="الصفحة مو موجودة"
-      description="يمكن الرابط قديم أو فيه خطأ."
+      title={t('notFound.title')}
+      description={t('notFound.desc')}
       action={
         <Link to="/" className={buttonClasses('secondary', 'md')}>
-          الرجوع للرئيسية
+          {t('notFound.home')}
         </Link>
       }
     />
@@ -27,11 +28,11 @@ export function RouteErrorPage() {
     <div className="grid min-h-dvh place-items-center p-6">
       <EmptyState
         icon={<TriangleAlert className="size-6" />}
-        title={status === 404 ? 'الصفحة مو موجودة' : chunkFailed ? 'فيه تحديث جديد للوحة' : 'صار خطأ غير متوقع'}
-        description={chunkFailed ? 'حدّث الصفحة عشان تحمل النسخة الجديدة.' : 'جرّب تحدّث الصفحة، ولو تكرر الخطأ راجع سجل البوت.'}
+        title={status === 404 ? t('notFound.title') : chunkFailed ? t('routeError.updated') : t('routeError.unexpected')}
+        description={chunkFailed ? t('routeError.updatedDesc') : t('routeError.unexpectedDesc')}
         action={
           <button type="button" onClick={() => window.location.reload()} className={buttonClasses('primary', 'md')}>
-            تحديث الصفحة
+            {t('common.reload')}
           </button>
         }
       />

@@ -1,6 +1,8 @@
-import type { ContentKind, GuildOptions, PingMode, Platform, SettingsDto, SettingsUpdate } from '../api/types';
+import type { ContentKind, GuildFeatures, GuildOptions, PingMode, Platform, SettingsDto, SettingsUpdate } from '../api/types';
+import { diffFeatures, featuresDraft, validateFeatures } from './features';
 import { isSnowflake } from './discord';
 import { CONTENT_KINDS, PLATFORMS } from './platforms';
+import { t } from '../i18n/core';
 
 export const ID_FIELDS = ['streamerRoleId', 'liveRoleId', 'liveChannelId', 'contentChannelId', 'logChannelId', 'pingRoleId'] as const;
 export type IdField = (typeof ID_FIELDS)[number];
@@ -17,6 +19,8 @@ export interface SettingsDraft {
   platformsEnabled: Platform[];
   contentKinds: ContentKind[];
   options: GuildOptions;
+  /** v2 optional features (complete, defaults-filled copy). */
+  features: GuildFeatures;
 }
 
 export function draftFromSettings(s: SettingsDto): SettingsDraft {
@@ -31,6 +35,7 @@ export function draftFromSettings(s: SettingsDto): SettingsDraft {
     platformsEnabled: PLATFORMS.filter((p) => s.platformsEnabled.includes(p)),
     contentKinds: CONTENT_KINDS.filter((k) => s.contentKinds.includes(k)),
     options: { ...s.options },
+    features: featuresDraft(s.features),
   };
 }
 
@@ -61,6 +66,8 @@ export function diffSettings(saved: SettingsDto, draft: SettingsDraft): Settings
     if (draft.options[key] !== saved.options[key]) (options as Record<string, unknown>)[key] = draft.options[key];
   }
   if (Object.keys(options).length > 0) update.options = options;
+  const features = diffFeatures(saved.features, draft.features);
+  if (features) update.features = features;
   return update;
 }
 
@@ -85,18 +92,21 @@ export function validateDraft(draft: SettingsDraft, guildId: string): Partial<Re
   const errors: Partial<Record<string, string>> = {};
   for (const field of ID_FIELDS) {
     const value = draft[field].trim();
-    if (value && !isSnowflake(value)) errors[field] = 'الآيدي لازم يكون رقم من 17 إلى 20 خانة';
-    else if (value && value === guildId && field.endsWith('RoleId')) errors[field] = 'ما ينفع تختار رتبة @everyone';
+    if (value && !isSnowflake(value)) errors[field] = t('settings.err.snowflake');
+    else if (value && value === guildId && field.endsWith('RoleId')) errors[field] = t('settings.err.everyone');
   }
   if (!errors.liveRoleId && draft.streamerRoleId.trim() && draft.streamerRoleId.trim() === draft.liveRoleId.trim()) {
-    errors.liveRoleId = 'رتبة الستريمر ورتبة البث لازم يكونون رتبتين مختلفتين';
+    errors.liveRoleId = t('settings.err.sameRoles');
   }
-  if (draft.pingMode === 'role' && !draft.pingRoleId.trim()) errors.pingRoleId = 'اختر الرتبة اللي ينمنشن مع الإشعار';
+  if (draft.pingMode === 'role' && !draft.pingRoleId.trim()) errors.pingRoleId = t('settings.err.pingRole');
   for (const [key, limit] of Object.entries(OPTION_LIMITS)) {
     const value = draft.options[key as keyof typeof OPTION_LIMITS];
     if (!Number.isInteger(value) || value < limit.min || value > limit.max) {
-      errors[`options.${key}`] = `القيمة لازم تكون بين ${limit.min} و ${limit.max}`;
+      errors[`options.${key}`] = t('settings.err.range', { min: limit.min, max: limit.max });
     }
   }
+  const roleIds = [draft.streamerRoleId.trim(), draft.liveRoleId.trim()].filter(Boolean);
+  // Drafts built by older callers may lack features: nothing to validate then.
+  if (draft.features) Object.assign(errors, validateFeatures(draft.features, guildId, roleIds));
   return errors;
 }

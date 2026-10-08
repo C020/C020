@@ -1,4 +1,4 @@
-import { Braces, Eye, Loader2, MessageSquareText, Palette, RefreshCw, RotateCcw, Send, Sparkles, TriangleAlert } from 'lucide-react';
+import { Braces, Eye, Loader2, MessageSquareText, RefreshCw, RotateCcw, Send, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { TEMPLATE_VARIABLES } from '../../../src/shared/api';
@@ -6,6 +6,7 @@ import { isApiError } from '../api/client';
 import { useDiscordLookups, usePreview, useSettings, useTestMessage, useUpdateSettings } from '../api/queries';
 import type { SettingsDto, TemplateSpec, Templates } from '../api/types';
 import { DiscordMessage } from '../components/discord/DiscordMessage';
+import { ColorField, TemplateTextInput } from '../components/templates/TemplateFields';
 import type { MentionResolver } from '../components/discord/DiscordMarkdown';
 import { PageHeader } from '../components/PageHeader';
 import { SaveBar } from '../components/SaveBar';
@@ -13,8 +14,6 @@ import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader } from '../components/ui/Card';
 import { ErrorState } from '../components/ui/ErrorState';
-import { Field } from '../components/ui/Field';
-import { Input, Textarea } from '../components/ui/Input';
 import { Skeleton } from '../components/ui/Skeleton';
 import { Tabs } from '../components/ui/Tabs';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -25,7 +24,7 @@ import { useSession } from '../hooks/useSession';
 import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 import { cn } from '../lib/cn';
 import { confirmDialog } from '../lib/confirm';
-import { colorIntToHex, hexToColorInt, roleColorHex } from '../lib/format';
+import { roleColorHex } from '../lib/format';
 import {
   DEFAULT_TEMPLATES,
   draftFromSpec,
@@ -37,13 +36,14 @@ import {
   TEMPLATE_FIELD_LABELS,
   TEMPLATE_LIMITS,
   TEMPLATE_TYPE_LABELS,
+  variableDescription,
   TEMPLATE_TYPES,
-  unknownVariables,
   type TemplateDraft,
   type TemplateTextField,
   type TemplateType,
 } from '../lib/templates';
 import { toast } from '../lib/toast';
+import { t } from '../i18n';
 
 type Drafts = Record<TemplateType, TemplateDraft>;
 
@@ -56,7 +56,7 @@ export default function TemplatesPage() {
   const settings = useSettings(guildId);
   return (
     <div className="space-y-6">
-      <PageHeader title="الرسائل" icon={<MessageSquareText className="size-5" />} description="خصّص شكل إشعارات البث والملخص والمقاطع، وشوف المعاينة مباشرة" />
+      <PageHeader title={t('nav.templates')} icon={<MessageSquareText className="size-5" />} description={t('tpl.desc')} />
       {settings.data ? (
         <TemplatesEditor saved={settings.data} />
       ) : settings.isError ? (
@@ -143,7 +143,7 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
     new Promise((resolve) => {
       if (!dirty) return resolve(true);
       if (overLimit) {
-        toast.error('فيه نص أطول من حد ديسكورد');
+        toast.error(t('tpl.tooLong'));
         return resolve(false);
       }
       const templates: Partial<Record<TemplateType, TemplateSpec>> = {};
@@ -160,11 +160,11 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
               return out;
             });
             setExternalChange(false);
-            toast.success(dirtyTypes.length > 1 ? 'تم حفظ القوالب' : 'تم حفظ القالب');
+            toast.success(dirtyTypes.length > 1 ? t('tpl.savedMany') : t('tpl.savedOne'));
             resolve(true);
           },
           onError: (error) => {
-            toast.error(isApiError(error) ? error.message : 'ما قدرنا نحفظ القالب');
+            toast.error(isApiError(error) ? error.message : t('tpl.saveFailed'));
             resolve(false);
           },
         },
@@ -180,9 +180,9 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
 
   const resetToDefault = async (): Promise<void> => {
     const ok = await confirmDialog({
-      title: `إرجاع ${TEMPLATE_TYPE_LABELS[tab].label} للافتراضي؟`,
-      description: 'بتنمسح التخصيصات حقت هذا النوع وترجع الرسالة الافتراضية. التغيير ما ينحفظ إلا لما تضغط حفظ.',
-      confirmLabel: 'إرجاع للافتراضي',
+      title: t('tpl.resetTitle', { name: TEMPLATE_TYPE_LABELS[tab].label }),
+      description: t('tpl.resetDesc'),
+      confirmLabel: t('tpl.resetConfirm'),
     });
     if (ok) setDrafts((d) => ({ ...d, [tab]: draftFromSpec(undefined) }));
   };
@@ -190,17 +190,17 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
   const sendTest = async (): Promise<void> => {
     if (!sameDraft(drafts[tab], bases[tab])) {
       const ok = await confirmDialog({
-        title: 'نحفظ التغييرات أول؟',
-        description: 'رسالة التجربة تنرسل بالقالب المحفوظ. بنحفظ تعديلاتك وبعدها نرسل التجربة.',
-        confirmLabel: 'حفظ وإرسال',
+        title: t('tpl.saveFirstTitle'),
+        description: t('tpl.saveFirstDesc'),
+        confirmLabel: t('tpl.saveAndSend'),
       });
       if (!ok || !(await save())) return;
     }
     testMessage.mutate(tab, {
       onSuccess: (result) =>
-        toast.success('انرسلت رسالة التجربة', {
-          description: tab === 'content' ? 'في روم إشعارات المقاطع' : 'في روم إشعارات البث',
-          action: result.messageUrl ? { label: 'فتح الرسالة في ديسكورد', href: result.messageUrl } : undefined,
+        toast.success(t('tpl.testSent'), {
+          description: tab === 'content' ? t('tpl.inContentChannel') : t('tpl.inLiveChannel'),
+          action: result.messageUrl ? { label: t('tpl.openMessage'), href: result.messageUrl } : undefined,
         }),
     });
   };
@@ -212,14 +212,14 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
       <Tabs<TemplateType>
         value={tab}
         onChange={setTab}
-        items={TEMPLATE_TYPES.map((t) => ({
-          value: t,
-          label: TEMPLATE_TYPE_LABELS[t].label,
-          badge: !sameDraft(drafts[t], bases[t]) ? (
-            <span className="size-1.5 rounded-full bg-amber-400" aria-label="فيه تغييرات" />
-          ) : !isDefaultDraft(bases[t]) ? (
+        items={TEMPLATE_TYPES.map((type) => ({
+          value: type,
+          label: TEMPLATE_TYPE_LABELS[type].label,
+          badge: !sameDraft(drafts[type], bases[type]) ? (
+            <span className="size-1.5 rounded-full bg-amber-400" aria-label={t('tpl.hasChanges')} />
+          ) : !isDefaultDraft(bases[type]) ? (
             <Badge tone="violet" size="sm">
-              مخصص
+              {t('tpl.custom')}
             </Badge>
           ) : undefined,
         }))}
@@ -228,7 +228,7 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
       {externalChange && (
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl bg-sky-500/[0.07] p-4 ring-1 ring-inset ring-sky-500/20">
           <RefreshCw className="size-4 text-sky-300" />
-          <p className="flex-1 text-[13px] text-sky-100/90">القوالب تغيّرت من مكان ثاني وأنت تعدّل. لو حفظت بتنكتب تعديلاتك فوقها.</p>
+          <p className="flex-1 text-[13px] text-sky-100/90">{t('tpl.changedElsewhere')}</p>
           <Button
             size="sm"
             variant="secondary"
@@ -239,7 +239,7 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
               setExternalChange(false);
             }}
           >
-            تحميل النسخة الجديدة
+            {t('settings.loadNew')}
           </Button>
         </div>
       )}
@@ -252,7 +252,7 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
             description={TEMPLATE_TYPE_LABELS[tab].description}
             actions={
               <Button size="sm" variant="ghost" onClick={() => void resetToDefault()} disabled={isDefaultDraft(draft)} icon={<RotateCcw className="size-3.5" />}>
-                الافتراضي
+                {t('tpl.default')}
               </Button>
             }
           />
@@ -260,7 +260,7 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
             <div className="rounded-xl bg-white/[0.02] p-3 ring-1 ring-inset ring-white/[0.05]">
               <p className="mb-2 flex items-center gap-1.5 text-xs text-zinc-400">
                 <Braces className="size-3.5" />
-                المتغيرات — اضغط عشان تنضاف في
+                {t('tpl.variablesHint')}
                 <span className="font-medium text-violet-300">{TEMPLATE_FIELD_LABELS[activeField].label}</span>
               </p>
               <div className="flex flex-wrap gap-1.5">
@@ -268,13 +268,13 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
                   <button
                     key={v.key}
                     type="button"
-                    title={v.description}
+                    title={variableDescription(tab, v)}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => insertVariable(v.key)}
                     className="group inline-flex h-7 items-center gap-1.5 rounded-lg bg-violet-500/10 px-2 text-xs ring-1 ring-inset ring-violet-400/20 transition-colors hover:bg-violet-500/20"
                   >
                     <code dir="ltr" className="font-mono text-violet-200">{`{${v.key}}`}</code>
-                    <span className="hidden text-zinc-400 group-hover:text-zinc-300 sm:inline">{v.description}</span>
+                    <span className="hidden text-zinc-400 group-hover:text-zinc-300 sm:inline">{variableDescription(tab, v)}</span>
                   </button>
                 ))}
               </div>
@@ -310,131 +310,9 @@ function TemplatesEditor({ saved }: { saved: SettingsDto }) {
         saving={updateSettings.isPending}
         onSave={() => void save()}
         onReset={discard}
-        saveLabel={dirtyTypes.length > 1 ? 'حفظ القوالب' : 'حفظ القالب'}
+        saveLabel={dirtyTypes.length > 1 ? t('tpl.saveMany') : t('tpl.saveOne')}
       />
     </>
-  );
-}
-
-function TemplateTextInput({
-  field,
-  value,
-  placeholder,
-  variables,
-  active,
-  onFocus,
-  onChange,
-  inputRef,
-}: {
-  field: TemplateTextField;
-  value: string;
-  placeholder: string;
-  variables: ReadonlyArray<{ key: string }>;
-  active: boolean;
-  onFocus: () => void;
-  onChange: (value: string) => void;
-  inputRef: (el: HTMLInputElement | HTMLTextAreaElement | null) => void;
-}) {
-  const limit = TEMPLATE_LIMITS[field];
-  const length = [...value].length;
-  const unknown = unknownVariables(value, variables);
-  const multiline = field === 'content' || field === 'description';
-  const id = `tpl-${field}`;
-  const meta = TEMPLATE_FIELD_LABELS[field];
-  const common = {
-    id,
-    value,
-    onFocus,
-    onChange: (e: { target: { value: string } }) => onChange(e.target.value),
-    placeholder: placeholder ? `الافتراضي: ${placeholder.replace(/\n/g, ' ⏎ ')}` : 'فاضي (بدون نص)',
-    invalid: length > limit,
-    dir: 'auto' as const,
-  };
-
-  return (
-    <Field
-      label={
-        <span className="inline-flex items-center gap-1.5">
-          {meta.label}
-          {active && <span className="size-1.5 rounded-full bg-violet-400" title="المتغيرات تنضاف هنا" />}
-        </span>
-      }
-      htmlFor={id}
-      hint={unknown.length > 0 ? undefined : meta.hint}
-      error={length > limit ? `النص أطول من حد ديسكورد (${limit} حرف)` : null}
-      aside={<span className={cn('tabular-nums', length > limit * 0.9 && 'text-amber-400', length > limit && 'text-rose-400')}>{`${length}/${limit}`}</span>}
-    >
-      {multiline ? (
-        <Textarea {...common} ref={inputRef} rows={field === 'description' ? 4 : 2} />
-      ) : (
-        <Input {...common} ref={inputRef} />
-      )}
-      {unknown.length > 0 && (
-        <p className="flex items-center gap-1.5 text-xs text-amber-300/90">
-          <TriangleAlert className="size-3.5 shrink-0" />
-          متغيرات غير معروفة (بتطلع فاضية):
-          <code dir="ltr" className="font-mono">
-            {unknown.map((k) => `{${k}}`).join(' ')}
-          </code>
-        </p>
-      )}
-    </Field>
-  );
-}
-
-const COLOR_PRESETS = [0x5865f2, 0x9146ff, 0x53fc18, 0xff0000, 0xfe2c55, 0xf59e0b, 0x10b981, 0x0ea5e9, 0xec4899, 0xffffff];
-
-function ColorField({ value, onChange }: { value: number | null; onChange: (color: number | null) => void }) {
-  const hex = colorIntToHex(value);
-  const [text, setText] = useState(hex ?? '');
-  useEffect(() => setText(hex ?? ''), [hex]);
-
-  return (
-    <Field label="لون الـ Embed" hint="اتركه على «لون المنصة» عشان ياخذ لون تويتش/كيك/يوتيوب/تيك توك تلقائياً." aside={<Palette className="size-3.5" />}>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onChange(null)}
-          aria-pressed={value === null}
-          className={cn(
-            'inline-flex h-9 items-center gap-2 rounded-xl px-3 text-[13px] ring-1 ring-inset transition-colors',
-            value === null ? 'bg-violet-500/15 text-violet-200 ring-violet-400/40' : 'text-zinc-400 ring-white/10 hover:text-zinc-200',
-          )}
-        >
-          <span className="size-4 rounded-full" style={{ background: 'conic-gradient(#9146ff 0 25%, #53fc18 0 50%, #ff0000 0 75%, #fe2c55 0)' }} />
-          لون المنصة
-        </button>
-        <div className="flex flex-wrap gap-1.5">
-          {COLOR_PRESETS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              aria-label={colorIntToHex(c) ?? ''}
-              onClick={() => onChange(c)}
-              className={cn('size-7 rounded-lg ring-1 ring-inset ring-white/15 transition-transform hover:scale-110', value === c && 'ring-2 ring-white')}
-              style={{ backgroundColor: roleColorHex(c) }}
-            />
-          ))}
-        </div>
-        <label className="relative grid size-9 cursor-pointer place-items-center overflow-hidden rounded-xl ring-1 ring-inset ring-white/15" title="لون مخصص">
-          <input type="color" value={hex ?? '#5865f2'} onChange={(e) => onChange(hexToColorInt(e.target.value))} className="absolute inset-0 size-full cursor-pointer opacity-0" />
-          <span className="size-5 rounded-md" style={{ backgroundColor: hex ?? 'transparent', backgroundImage: hex ? undefined : 'linear-gradient(135deg, #3f3f46 25%, transparent 25%, transparent 50%, #3f3f46 50%, #3f3f46 75%, transparent 75%)', backgroundSize: '8px 8px' }} />
-        </label>
-        <Input
-          dir="ltr"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            const parsed = hexToColorInt(e.target.value);
-            if (parsed !== null) onChange(parsed);
-          }}
-          onBlur={() => setText(hex ?? '')}
-          placeholder="#5865F2"
-          block={false}
-          className="w-28 font-mono"
-        />
-      </div>
-    </Field>
   );
 }
 
@@ -455,7 +333,7 @@ function PreviewPanel({ type, draft, onTest, testing }: { type: TemplateType; dr
         return role ? { name: role.name, color: roleColorHex(role.color) } : null;
       },
       channel: (id) => channels.get(id) ?? null,
-      user: (id) => (id === me.bot?.id ? 'ستريمر تجريبي' : null),
+      user: (id) => (id === me.bot?.id ? t('tpl.sampleStreamer') : null),
     };
   }, [lookups.data, me.bot?.id]);
 
@@ -465,13 +343,13 @@ function PreviewPanel({ type, draft, onTest, testing }: { type: TemplateType; dr
     <Card className="xl:sticky xl:top-24">
       <CardHeader
         icon={<Eye className="size-[18px]" />}
-        title="المعاينة"
-        description="ببيانات تجريبية، بنفس شكل ديسكورد"
+        title={t('tpl.preview')}
+        description={t('tpl.previewDesc')}
         actions={
           <>
-            {updating && <Loader2 className="size-4 animate-spin text-zinc-500" aria-label="جاري التحديث" />}
+            {updating && <Loader2 className="size-4 animate-spin text-zinc-500" aria-label={t('common.updating')} />}
             <Button size="sm" variant="primary" onClick={onTest} loading={testing} icon={<Send className="size-3.5" />}>
-              إرسال تجربة
+              {t('tpl.sendTest')}
             </Button>
           </>
         }
@@ -482,11 +360,11 @@ function PreviewPanel({ type, draft, onTest, testing }: { type: TemplateType; dr
             <DiscordMessage message={preview.data} author={{ name: me.bot?.username ?? 'Stream Bot', avatarUrl: me.bot?.avatarUrl ?? null, id: me.bot?.id }} resolver={resolver} />
           </div>
         ) : preview.isError ? (
-          <ErrorState compact error={preview.error} onRetry={() => void preview.refetch()} retrying={preview.isFetching} title="ما قدرنا نجهز المعاينة" />
+          <ErrorState compact error={preview.error} onRetry={() => void preview.refetch()} retrying={preview.isFetching} title={t('tpl.previewFailed')} />
         ) : (
           <Skeleton className="h-72 rounded-xl" />
         )}
-        {preview.isError && preview.data && <p className="mt-2 text-xs text-amber-300/90">آخر تحديث للمعاينة فشل، المعروضة قديمة.</p>}
+        {preview.isError && preview.data && <p className="mt-2 text-xs text-amber-300/90">{t('tpl.previewStale')}</p>}
       </CardBody>
     </Card>
   );

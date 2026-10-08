@@ -1,7 +1,9 @@
 /**
  * Fetch wrapper for the dashboard API: cookie session, CSRF header on mutations (with one transparent
- * refresh-and-retry when the token went stale), request timeouts, and Arabic error messages.
+ * refresh-and-retry when the token went stale), request timeouts, and localized error messages. Every request
+ * carries `x-ui-lang` so the server answers errors in the dashboard language.
  */
+import { getLang, t, type MessageKey } from '../i18n/core';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
@@ -37,32 +39,35 @@ export function isApiError(error: unknown): error is ApiRequestError {
   return error instanceof ApiRequestError;
 }
 
-/** User-facing Arabic message for any thrown value. */
-export function errorMessage(error: unknown, fallback = 'صار خطأ غير متوقع، جرّب مرة ثانية'): string {
+/** User-facing message (in the dashboard language) for any thrown value. */
+export function errorMessage(error: unknown, fallback?: string): string {
   if (error instanceof ApiRequestError) return error.message;
-  if (error instanceof Error && error.name === 'AbortError') return 'انلغى الطلب';
-  return fallback;
+  if (error instanceof Error && error.name === 'AbortError') return t('errors.aborted');
+  return fallback ?? t('errors.unexpected');
 }
 
-const FALLBACK_MESSAGES: Record<number, string> = {
-  0: 'تعذّر الاتصال بالسيرفر، تأكد من الإنترنت وجرّب مرة ثانية',
-  400: 'الطلب غير صالح',
-  401: 'انتهت جلستك، سجّل دخولك مرة ثانية',
-  403: 'ما عندك صلاحية لهذا الإجراء',
-  404: 'المطلوب غير موجود',
-  408: 'السيرفر تأخر بالرد، جرّب مرة ثانية',
-  409: 'فيه تعارض مع بيانات موجودة',
-  413: 'حجم الطلب أكبر من المسموح',
-  429: 'طلبات كثيرة، هدّ شوي وجرّب بعد دقيقة',
-  500: 'صار خطأ غير متوقع في السيرفر، جرّب مرة ثانية',
-  502: 'السيرفر ما قدر يوصل للخدمة المطلوبة، جرّب بعد شوي',
-  503: 'السيرفر مو متاح الحين، جرّب بعد شوي',
-  504: 'السيرفر تأخر بالرد، جرّب مرة ثانية',
+const FALLBACK_MESSAGES: Record<number, MessageKey> = {
+  0: 'errors.http0',
+  400: 'errors.http400',
+  401: 'errors.http401',
+  403: 'errors.http403',
+  404: 'errors.http404',
+  408: 'errors.http408',
+  409: 'errors.http409',
+  413: 'errors.http413',
+  429: 'errors.http429',
+  500: 'errors.http500',
+  502: 'errors.http502',
+  503: 'errors.http503',
+  504: 'errors.http504',
 };
 
 function fallbackMessage(status: number): string {
-  return FALLBACK_MESSAGES[status] ?? (status >= 500 ? FALLBACK_MESSAGES[500]! : FALLBACK_MESSAGES[400]!);
+  return t(FALLBACK_MESSAGES[status] ?? (status >= 500 ? 'errors.http500' : 'errors.http400'));
 }
+
+/** Header telling the server which language to answer error messages in. */
+export const UI_LANG_HEADER = 'x-ui-lang';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MUTATING = new Set<HttpMethod>(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -164,7 +169,7 @@ async function refreshCsrf(): Promise<void> {
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}, attempt = 0): Promise<T> {
   const method = options.method ?? 'GET';
-  const headers: Record<string, string> = { accept: 'application/json' };
+  const headers: Record<string, string> = { accept: 'application/json', [UI_LANG_HEADER]: getLang() };
   let body: string | undefined;
   if (options.body !== undefined) {
     headers['content-type'] = 'application/json';
@@ -187,8 +192,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}, 
     });
   } catch (error) {
     if (options.signal?.aborted) throw error;
-    if (timeout.aborted) throw new ApiRequestError(0, 'timeout', FALLBACK_MESSAGES[504]!);
-    throw new ApiRequestError(0, 'network', FALLBACK_MESSAGES[0]!);
+    if (timeout.aborted) throw new ApiRequestError(0, 'timeout', fallbackMessage(504));
+    throw new ApiRequestError(0, 'network', fallbackMessage(0));
   }
 
   const payload = await parseBody(response).catch(() => undefined);

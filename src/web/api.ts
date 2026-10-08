@@ -5,7 +5,10 @@ import type { FastifyInstance } from 'fastify';
 import { SESSION_COOKIE } from './auth.js';
 import { CSRF_HEADER, isMutating } from './csrf.js';
 import { HttpError, unauthorized } from './httpErrors.js';
+import { localizeMessage, requestLanguage } from './i18n.js';
 import { guildIdOf, requireAuth, type ApiDeps } from './routes/deps.js';
+import { registerApplicationRoutes } from './routes/applications.js';
+import { registerFeatureRoutes } from './routes/features.js';
 import { registerGuildRoutes } from './routes/guild.js';
 import { registerHistoryRoutes } from './routes/history.js';
 import { registerMeRoutes } from './routes/me.js';
@@ -16,8 +19,11 @@ import { registerToolRoutes } from './routes/tools.js';
 export const API_RATE_LIMIT = { max: 120, timeWindow: 60_000 };
 
 export async function apiPlugin(api: FastifyInstance, deps: ApiDeps): Promise<void> {
-  api.setNotFoundHandler((_request, reply) => {
-    void reply.code(404).header('cache-control', 'no-store').send({ error: 'not_found', message: 'المسار غير موجود' });
+  api.setNotFoundHandler((request, reply) => {
+    void reply
+      .code(404)
+      .header('cache-control', 'no-store')
+      .send({ error: 'not_found', message: localizeMessage('المسار غير موجود', requestLanguage(request)) });
   });
 
   // preParsing (not onRequest): route-level onRequest hooks such as the rate limiter must run first,
@@ -52,6 +58,8 @@ export async function apiPlugin(api: FastifyInstance, deps: ApiDeps): Promise<vo
       registerStreamerRoutes(g, deps);
       registerHistoryRoutes(g, deps);
       registerToolRoutes(g, deps);
+      registerApplicationRoutes(g, deps);
+      registerFeatureRoutes(g, deps);
     },
     { prefix: '/guilds/:guildId' },
   );

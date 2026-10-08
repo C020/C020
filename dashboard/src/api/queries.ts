@@ -18,7 +18,14 @@ import { ApiRequestError, errorMessage, setCsrfRefresher, setCsrfToken } from '.
 import { api } from './endpoints';
 import type {
   AccountInput,
+  ApplicationDto,
+  ApplicationStatus,
+  ApproveApplicationRequest,
   AuditEntry,
+  LinkPlatform,
+  ManualPostRequest,
+  PanelKind,
+  StatsRange,
   AuditLevel,
   CreateStreamerRequest,
   GuildOverview,
@@ -50,7 +57,14 @@ export const keys = {
     level === undefined ? (['guild', guildId, 'audit'] as const) : (['guild', guildId, 'audit', level] as const),
   leaderboard: (guildId: string, days?: number) =>
     days === undefined ? (['guild', guildId, 'leaderboard'] as const) : (['guild', guildId, 'leaderboard', days] as const),
-  preview: (guildId: string, type: MessageType, template: TemplateSpec | undefined) => ['guild', guildId, 'preview', type, template] as const,
+  preview: (guildId: string, type: MessageType, template: TemplateSpec | undefined, streamerId?: number) =>
+    streamerId === undefined ? (['guild', guildId, 'preview', type, template] as const) : (['guild', guildId, 'preview', type, template, streamerId] as const),
+  applications: (guildId: string, status?: ApplicationStatus) =>
+    status === undefined ? (['guild', guildId, 'applications'] as const) : (['guild', guildId, 'applications', status] as const),
+  sessionDetail: (guildId: string, id: number) => ['guild', guildId, 'session', id] as const,
+  streamerStats: (guildId: string, id: number, days?: StatsRange) =>
+    days === undefined ? (['guild', guildId, 'stats', id] as const) : (['guild', guildId, 'stats', id, days] as const),
+  manualInspect: (guildId: string, url: string) => ['guild', guildId, 'manual-inspect', url] as const,
 };
 
 declare module '@tanstack/react-query' {
@@ -177,8 +191,8 @@ export function useMember(guildId: string, userId: string | null) {
   });
 }
 
-export function useSettings(guildId: string) {
-  return useQuery({ queryKey: keys.settings(guildId), queryFn: ({ signal }) => api.settings(guildId, signal) });
+export function useSettings(guildId: string, enabled = true) {
+  return useQuery({ queryKey: keys.settings(guildId), queryFn: ({ signal }) => api.settings(guildId, signal), enabled: enabled && guildId !== '' });
 }
 
 export function useUpdateSettings(guildId: string) {
@@ -382,15 +396,121 @@ export function useTestMessage(guildId: string) {
   return useMutation({ mutationFn: (type: MessageType) => api.test(guildId, type) });
 }
 
-export function usePreview(guildId: string, type: MessageType, template: TemplateSpec | undefined) {
+export function usePreview(guildId: string, type: MessageType, template: TemplateSpec | undefined, streamerId?: number) {
   return useQuery({
-    queryKey: keys.preview(guildId, type, template),
-    queryFn: ({ signal }) => api.preview(guildId, type, template, signal),
+    queryKey: keys.preview(guildId, type, template, streamerId),
+    queryFn: ({ signal }) => api.preview(guildId, type, template, signal, streamerId),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
   });
+}
+
+// ───────────── v2: applications (#9) ─────────────
+
+export const APPLICATIONS_PAGE_SIZE = 50;
+
+export function useApplications(guildId: string, status: ApplicationStatus) {
+  return useInfiniteQuery({
+    queryKey: keys.applications(guildId, status),
+    queryFn: ({ pageParam, signal }) => api.applications(guildId, { status, limit: APPLICATIONS_PAGE_SIZE, beforeId: pageParam ?? undefined }, signal),
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => (lastPage.length < APPLICATIONS_PAGE_SIZE ? null : (lastPage[lastPage.length - 1]?.id ?? null)),
+    refetchInterval: 120_000,
+  });
+}
+
+function useApplicationDecision<V>(guildId: string, fn: (vars: V) => Promise<ApplicationDto>) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    meta: { silent: true },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.applications(guildId) });
+      void client.invalidateQueries({ queryKey: keys.overview(guildId) });
+    },
+  });
+}
+
+export function useApproveApplication(guildId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: ApproveApplicationRequest }) => api.approveApplication(guildId, id, body),
+    meta: { silent: true },
+    onSuccess: (result) => {
+      upsertStreamer(client, guildId, result.streamer);
+      void client.invalidateQueries({ queryKey: keys.applications(guildId) });
+      void client.invalidateQueries({ queryKey: keys.overview(guildId) });
+    },
+  });
+}
+
+export function useRejectApplication(guildId: string) {
+  return useApplicationDecision(guildId, ({ id, note }: { id: number; note: string | null }) => api.rejectApplication(guildId, id, note));
+}
+
+// ───────────── v2: panels, digest, manual posts ─────────────
+
+export function usePostPanel(guildId: string) {
+  return useMutation({ mutationFn: (kind: PanelKind) => api.postPanel(guildId, kind) });
+}
+
+export function usePostDigestNow(guildId: string) {
+  return useMutation({ mutationFn: () => api.postDigestNow(guildId) });
+}
+
+export function useInspectManualPost(guildId: string, url: string) {
+  const value = url.trim();
+  return useQuery({
+    queryKey: keys.manualInspect(guildId, value),
+    queryFn: ({ signal }) => api.inspectManualPost(guildId, value, signal),
+    enabled: /^https?:\/\/\S+\.\S+/i.test(value),
+    staleTime: 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useManualPost(guildId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ManualPostRequest) => api.manualPost(guildId, body),
+    meta: { silent: true },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.content(guildId) });
+      void client.invalidateQueries({ queryKey: keys.overview(guildId) });
+      void client.invalidateQueries({ queryKey: ['guild', guildId, 'manual-inspect'] });
+    },
+  });
+}
+
+// ───────────── v2: statistics (#13) ─────────────
+
+export function useSessionDetail(guildId: string, id: number) {
+  return useQuery({
+    queryKey: keys.sessionDetail(guildId, id),
+    queryFn: ({ signal }) => api.sessionDetail(guildId, id, signal),
+    enabled: Number.isInteger(id) && id > 0,
+    // Live sessions keep growing; ended ones never change.
+    refetchInterval: (query) => (query.state.data?.status === 'live' ? 60_000 : false),
+  });
+}
+
+export function useStreamerStats(guildId: string, id: number, days: StatsRange) {
+  return useQuery({
+    queryKey: keys.streamerStats(guildId, id, days),
+    queryFn: ({ signal }) => api.streamerStats(guildId, id, days, signal),
+    enabled: Number.isInteger(id) && id > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  });
+}
+
+// ───────────── v2: account links (#11) ─────────────
+
+export function useRemoveLink(guildId: string) {
+  return useStreamerMutation(guildId, ({ id, platform }: { id: number; platform: LinkPlatform }) => api.removeLink(guildId, id, platform));
 }
 
 /** Invalidates several keys at most once per `delayMs` (bursts of realtime events → one refetch). */

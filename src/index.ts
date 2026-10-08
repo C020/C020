@@ -13,6 +13,12 @@ import { AuditService } from './services/audit.js';
 import { ContentService } from './services/contentService.js';
 import { SessionService } from './services/sessionService.js';
 import { StreamerService } from './services/streamerService.js';
+import { ApplicationService } from './services/applicationService.js';
+import { CounterService } from './services/counterService.js';
+import { LinkService } from './services/linkService.js';
+import { ManualPostService } from './services/manualPostService.js';
+import { PresenceService } from './services/presenceService.js';
+import { StatsService } from './services/statsService.js';
 import { createWebServer } from './web/server.js';
 
 function readVersion(): string {
@@ -36,7 +42,14 @@ async function main(): Promise<void> {
   const repos = new Repositories(db);
   const events = new AppEvents();
   const audit = new AuditService(repos, events);
-  const providers = new ProviderRegistry({ config, logger, kv: repos.kv });
+  // Providers read linked-account tokens lazily: LinkService needs StreamerService, which is created later.
+  let linkService: LinkService | null = null;
+  const providers = new ProviderRegistry({
+    config,
+    logger,
+    kv: repos.kv,
+    links: { tiktokAccessToken: (handle) => (linkService ? linkService.tiktokAccessToken(handle) : Promise.resolve(null)) },
+  });
 
   // Wiring order breaks the dependency cycle: Discord (notifier/roles) → services → monitor → streamer management.
   const discord = new DiscordService({ config, repos, audit, events });
@@ -45,9 +58,27 @@ async function main(): Promise<void> {
   const content = new ContentService({ repos, audit, events, notifier: discord });
   const monitor = new Monitor({ config, repos, providers, live: sessions, content, audit, events });
   const streamers = new StreamerService({ repos, audit, providers, discord, roles: discord, sessions, monitor });
-  discord.attachServices({ streamers, sessions, repos, audit });
+  linkService = new LinkService({ config, repos, audit, streamers });
+  const links = linkService;
+  const stats = new StatsService({ repos });
+  const presence = new PresenceService({ repos, audit, events, notifier: discord, roles: discord, discord, sessions });
+  const counter = new CounterService({ repos, events, audit, discord, presence });
+  const applications = new ApplicationService({
+    repos,
+    audit,
+    events,
+    streamers,
+    providers,
+    discord,
+    guildName: (guildId) => discord.guild(guildId)?.name ?? null,
+  });
+  const manualPosts = new ManualPostService({ repos, audit, events, notifier: discord });
+  discord.attachServices({ streamers, sessions, repos, audit, applications, manualPosts, links, presence, counter, content });
   // Role changes may have failed while the gateway was away.
-  discord.onGatewayRecovered(() => void sessions.reconcileLiveRoles().catch((err) => logger.warn({ err }, 'Live role reconcile failed')));
+  discord.onGatewayRecovered(() => {
+    void sessions.reconcileLiveRoles().catch((err) => logger.warn({ err }, 'Live role reconcile failed'));
+    void presence.reconcile().catch((err) => logger.warn({ err }, 'Presence reconcile failed'));
+  });
 
   const ctx: AppContext = {
     config,
@@ -62,6 +93,12 @@ async function main(): Promise<void> {
     sessions,
     content,
     discord,
+    applications,
+    manualPosts,
+    stats,
+    presence,
+    counter,
+    links,
   };
 
   logProviderSummary(ctx);
@@ -78,6 +115,9 @@ async function main(): Promise<void> {
   await sessions.reconcile().catch((err) => logger.error({ err }, 'Startup reconcile failed'));
   sessions.start();
   monitor.start();
+  content.start?.();
+  presence.start();
+  counter.start();
   audit.record({ action: 'bot.start', message: `البوت اشتغل (الإصدار ${version})`, mirror: false });
 
   let shuttingDown = false;
@@ -88,6 +128,9 @@ async function main(): Promise<void> {
     const force = setTimeout(() => process.exit(1), 15_000);
     force.unref();
     await monitor.stop().catch(() => {});
+    content.stop?.();
+    presence.stop();
+    counter.stop();
     sessions.stop();
     await web.stop().catch(() => {});
     await discord.stop().catch(() => {});

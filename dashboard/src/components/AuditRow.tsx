@@ -5,6 +5,7 @@ import { useNow } from '../hooks/useNow';
 import { actorLabel, auditCategory, AUDIT_CATEGORY_LABELS, type AuditCategory } from '../lib/audit';
 import { cn } from '../lib/cn';
 import { formatDateTime, formatRelative } from '../lib/format';
+import { t } from '../i18n';
 
 const CATEGORY_ICONS: Record<AuditCategory, typeof Radio> = {
   live: Radio,
@@ -51,7 +52,7 @@ export function AuditRow({ entry, currentUserId, expandable = false }: { entry: 
           </time>
           {hasDetails && (
             <button type="button" onClick={() => setOpen((v) => !v)} className="inline-flex items-center gap-0.5 text-zinc-500 hover:text-zinc-300" aria-expanded={open}>
-              التفاصيل
+              {t('common.details')}
               <ChevronDown className={cn('size-3 transition-transform', open && 'rotate-180')} />
             </button>
           )}

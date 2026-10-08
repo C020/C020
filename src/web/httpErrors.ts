@@ -10,6 +10,7 @@ import {
 import { PLATFORM_LABELS } from '../core/types.js';
 import { PROVIDER_ENV_KEYS } from '../services/streamerService.js';
 import type { ApiError } from '../shared/api.js';
+import { localizeMessage, requestLanguage } from './i18n.js';
 import { zodToValidationError } from './schemas.js';
 
 /** An error that already knows its HTTP status and user-facing (Arabic) message. */
@@ -114,6 +115,8 @@ export function installErrorHandler(app: FastifyInstance): void {
       request.log.debug({ code: mapped.body.error, status: mapped.status, url: request.url }, 'Request rejected');
     }
     if (reply.sent || reply.raw.headersSent) return;
-    void reply.code(mapped.status).headers(mapped.headers).header('cache-control', 'no-store').send(mapped.body);
+    // #16 — English text for dashboards running in English (header x-ui-lang: en).
+    const body: ApiError = { ...mapped.body, message: localizeMessage(mapped.body.message, requestLanguage(request)) };
+    void reply.code(mapped.status).headers(mapped.headers).header('cache-control', 'no-store').send(body);
   });
 }

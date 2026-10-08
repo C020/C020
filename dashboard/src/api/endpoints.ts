@@ -1,7 +1,18 @@
 import { apiRequest, ApiRequestError, http } from './client';
 import type {
   AccountInput,
+  ApplicationDto,
+  ApplicationStatus,
+  ApproveApplicationRequest,
+  ApproveApplicationResponse,
   AuditEntry,
+  LinkPlatform,
+  ManualPostPreviewDto,
+  ManualPostRequest,
+  PanelKind,
+  SessionDetailDto,
+  StatsRange,
+  StreamerStatsDto,
   AuditLevel,
   ContentDto,
   CreateStreamerRequest,
@@ -68,6 +79,21 @@ export const api = {
 
   test: (guildId: string, type: MessageType) => http.post<{ ok: true; messageUrl: string | null }>(g(guildId, '/test'), { type }),
   syncRoles: (guildId: string) => http.post<{ added: number; removed: number }>(g(guildId, '/sync-roles')),
-  preview: (guildId: string, type: MessageType, template: TemplateSpec | undefined, signal?: AbortSignal) =>
-    http.post<MessagePreview>(g(guildId, '/preview'), { type, template }, signal),
+  preview: (guildId: string, type: MessageType, template: TemplateSpec | undefined, signal?: AbortSignal, streamerId?: number) =>
+    http.post<MessagePreview>(g(guildId, '/preview'), streamerId === undefined ? { type, template } : { type, template, streamerId }, signal),
+
+  // ───────────── v2 ─────────────
+  applications: (guildId: string, params: { status?: ApplicationStatus; limit?: number; beforeId?: number }, signal?: AbortSignal) =>
+    http.get<ApplicationDto[]>(g(guildId, '/applications'), params, signal),
+  approveApplication: (guildId: string, id: number, body: ApproveApplicationRequest) =>
+    http.post<ApproveApplicationResponse>(g(guildId, `/applications/${id}/approve`), body),
+  rejectApplication: (guildId: string, id: number, note: string | null) => http.post<ApplicationDto>(g(guildId, `/applications/${id}/reject`), { note }),
+  postPanel: (guildId: string, kind: PanelKind) => http.post<{ ok: true; messageUrl: string }>(g(guildId, `/panels/${kind}`)),
+  postDigestNow: (guildId: string) => http.post<{ ok: true; messageUrl: string | null }>(g(guildId, '/digest/post-now')),
+  inspectManualPost: (guildId: string, url: string, signal?: AbortSignal) => http.post<ManualPostPreviewDto>(g(guildId, '/manual-posts/inspect'), { url }, signal),
+  manualPost: (guildId: string, body: ManualPostRequest) => http.post<{ ok: true; messageUrl: string | null }>(g(guildId, '/manual-posts'), body),
+  sessionDetail: (guildId: string, id: number, signal?: AbortSignal) => http.get<SessionDetailDto>(g(guildId, `/sessions/${id}`), undefined, signal),
+  streamerStats: (guildId: string, id: number, days: StatsRange, signal?: AbortSignal) =>
+    http.get<StreamerStatsDto>(g(guildId, `/streamers/${id}/stats`), { days }, signal),
+  removeLink: (guildId: string, id: number, platform: LinkPlatform) => http.delete<StreamerDto>(g(guildId, `/streamers/${id}/links/${platform}`)),
 };

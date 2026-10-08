@@ -14,6 +14,7 @@ import { useNow } from '../hooks/useNow';
 import { cn } from '../lib/cn';
 import { formatDateTime, formatDurationLong, formatNumber, formatRelative } from '../lib/format';
 import { PLATFORM_META } from '../lib/platforms';
+import { t, type MessageKey } from '../i18n';
 
 export default function SystemPage() {
   return <SystemStatusView />;
@@ -37,7 +38,7 @@ function providerHealth(p: ProviderStatus): Health {
   return 'ok';
 }
 
-const HEALTH_LABELS: Record<Health, string> = { ok: 'شغّالة', warn: 'فيها أخطاء متقطعة', error: 'متعطلة', off: 'غير مهيّأة' };
+const HEALTH_LABELS: Record<Health, MessageKey> = { ok: 'system.health.ok', warn: 'system.health.warn', error: 'system.health.error', off: 'system.health.off' };
 
 export function SystemStatusView() {
   const system = useSystem();
@@ -49,12 +50,12 @@ export function SystemStatusView() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="حالة النظام"
+        title={t('nav.systemStatus')}
         icon={<ServerCog className="size-5" />}
-        description="حالة المراقبة لكل منصة، الويب هوكس، وآخر الأخطاء"
+        description={t('system.desc')}
         actions={
           <Button variant="ghost" size="sm" onClick={() => void system.refetch()} loading={system.isFetching && !system.isPending} icon={<RefreshCw className="size-3.5" />}>
-            تحديث
+            {t('common.refresh')}
           </Button>
         }
       />
@@ -66,17 +67,17 @@ export function SystemStatusView() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-            <InfoTile icon={<Clock className="size-4" />} label="مدة التشغيل" loading={!data} value={formatDurationLong(uptime)} />
-            <InfoTile icon={<Tag className="size-4" />} label="الإصدار" loading={!data} value={<span dir="ltr">v{data?.version}</span>} />
+            <InfoTile icon={<Clock className="size-4" />} label={t('system.uptime')} loading={!data} value={formatDurationLong(uptime)} />
+            <InfoTile icon={<Tag className="size-4" />} label={t('system.version')} loading={!data} value={<span dir="ltr">v{data?.version}</span>} />
             <InfoTile
               icon={<Webhook className="size-4" />}
-              label="الويب هوكس"
+              label={t('system.webhooks')}
               loading={!data}
-              value={data?.webhooksEnabled ? <span className="text-emerald-300">مفعّلة</span> : <span className="text-zinc-400">متوقفة (استطلاع فقط)</span>}
+              value={data?.webhooksEnabled ? <span className="text-emerald-300">{t('system.enabled')}</span> : <span className="text-zinc-400">{t('system.webhooksOff')}</span>}
             />
             <InfoTile
               icon={<Globe className="size-4" />}
-              label="الرابط العام"
+              label={t('system.publicUrl')}
               loading={!data}
               value={
                 data?.publicUrl ? (
@@ -84,7 +85,7 @@ export function SystemStatusView() {
                     {data.publicUrl.replace(/^https?:\/\//, '')}
                   </span>
                 ) : (
-                  <span className="text-zinc-400">غير محدد</span>
+                  <span className="text-zinc-400">{t('system.notSet')}</span>
                 )
               }
             />
@@ -99,8 +100,7 @@ export function SystemStatusView() {
           <Card className="flex items-start gap-3 p-4 text-[13px] leading-relaxed text-zinc-400 sm:p-5">
             <Info className="mt-0.5 size-4 shrink-0 text-sky-300" />
             <p>
-              الاستطلاع الدوري (Polling) هو المصدر الأساسي للحالة دايماً. الويب هوكس (Twitch EventSub و Kick و YouTube WebSub) تسرّع وصول الإشعار لما تكون مفعّلة، وإذا تعطلت
-              يكمل البوت بالاستطلاع بدون ما يفوته شي.
+              {t('system.pollingInfo')}
             </p>
           </Card>
         </>
@@ -132,19 +132,19 @@ function ProviderCard({ provider, now }: { provider: ProviderStatus; now: number
           <h3 className="font-semibold text-zinc-100">{meta.label}</h3>
           <p className="mt-0.5 flex items-center gap-1.5 text-xs text-zinc-400">
             <StatusDot tone={health} />
-            {HEALTH_LABELS[health]}
+            {t(HEALTH_LABELS[health])}
           </p>
         </div>
         <div className="flex flex-col items-end gap-1.5">
           {provider.configured ? (
             <Badge tone="success">
               <CircleCheck className="size-3" />
-              مفعّلة
+              {t('system.enabled')}
             </Badge>
           ) : (
             <Badge tone="neutral">
               <CircleX className="size-3" />
-              بدون مفاتيح
+              {t('system.noKeys')}
             </Badge>
           )}
           {provider.configured &&
@@ -154,15 +154,15 @@ function ProviderCard({ provider, now }: { provider: ProviderStatus; now: number
                 Webhooks
               </Badge>
             ) : (
-              <Badge tone="neutral">استطلاع فقط</Badge>
+              <Badge tone="neutral">{t('system.pollingOnly')}</Badge>
             ))}
         </div>
       </div>
 
       <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
-        <Metric label="حسابات متابَعة" value={formatNumber(provider.trackedChannels)} />
+        <Metric label={t('system.tracked')} value={formatNumber(provider.trackedChannels)} />
         <Metric
-          label="لايف الحين"
+          label={t('session.liveNow')}
           value={
             <span className={cn('inline-flex items-center gap-1', provider.liveChannels > 0 && 'text-rose-300')}>
               {provider.liveChannels > 0 && <Radio className="size-3.5" />}
@@ -170,12 +170,12 @@ function ProviderCard({ provider, now }: { provider: ProviderStatus; now: number
             </span>
           }
         />
-        <Metric label="أخطاء متتالية" value={<span className={cn(provider.consecutiveErrors > 0 && 'text-amber-300')}>{formatNumber(provider.consecutiveErrors)}</span>} />
+        <Metric label={t('system.consecutive')} value={<span className={cn(provider.consecutiveErrors > 0 && 'text-amber-300')}>{formatNumber(provider.consecutiveErrors)}</span>} />
       </dl>
 
       <div className="mt-4 space-y-1.5 text-[12.5px]">
         <p className="flex items-center justify-between gap-3 text-zinc-500">
-          <span>آخر فحص ناجح</span>
+          <span>{t('system.lastSuccess')}</span>
           <span className="text-zinc-300" title={provider.lastSuccessAt ? formatDateTime(provider.lastSuccessAt) : undefined}>
             {provider.lastSuccessAt ? formatRelative(provider.lastSuccessAt, now) : '—'}
           </span>
@@ -184,7 +184,7 @@ function ProviderCard({ provider, now }: { provider: ProviderStatus; now: number
 
       {provider.lastError && (
         <div className="mt-3 rounded-xl bg-rose-500/[0.07] p-3 ring-1 ring-inset ring-rose-500/15">
-          <p className="text-[11.5px] font-medium text-rose-300">آخر خطأ</p>
+          <p className="text-[11.5px] font-medium text-rose-300">{t('system.lastError')}</p>
           <p className="mt-1 break-words text-xs leading-relaxed text-rose-100/80" dir="auto">
             {provider.lastError}
           </p>

@@ -4,6 +4,7 @@
  * code blocks, headings, -# subtext, quotes, bullet lists, masked links, autolinks, mentions,
  * <t:unix:style> timestamps and custom emojis.
  */
+import { intlLocale } from '../i18n/core';
 
 export type InlineNode =
   | { type: 'text'; value: string }
@@ -199,10 +200,9 @@ export function parseMarkdown(source: string): BlockNode[] {
   return blocks.filter((b) => !(b.type === 'paragraph' && b.children.every((c) => c.type === 'br' || (c.type === 'text' && !c.value.trim()))));
 }
 
-const LOCALE = 'ar-u-nu-latn';
-
-/** Formats a Discord timestamp tag the way the Discord client would (in Arabic). */
+/** Formats a Discord timestamp tag the way the Discord client would (in the dashboard language). */
 export function formatDiscordTimestamp(unix: number, style: TimestampStyle, nowMs: number = Date.now()): string {
+  const LOCALE = intlLocale();
   const date = new Date(unix * 1000);
   if (Number.isNaN(date.getTime())) return `<t:${unix}>`;
   switch (style) {

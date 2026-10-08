@@ -1,17 +1,21 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../../app/context.js';
 import type { StreamerDto } from '../../shared/api.js';
-import { notFound } from '../httpErrors.js';
+import { HttpError, notFound } from '../httpErrors.js';
 import {
   accountInputSchema,
   accountParams,
   createStreamerSchema,
+  linkPlatformParams,
   parseInput,
   streamerParams,
   updateAccountSchema,
   updateStreamerSchema,
 } from '../schemas.js';
-import { guildIdOf, requireAuth, type ApiDeps } from './deps.js';
+import { discordAction, guildIdOf, requireAuth, type ApiDeps } from './deps.js';
+
+const discordSafe = <T>(request: Parameters<typeof discordAction>[0], fn: () => Promise<T>): Promise<T> =>
+  discordAction(request, 'Removing account link', 'ما قدرنا نكمّل الطلب الحين، جرّب بعد شوي', fn);
 
 export function registerStreamerRoutes(g: FastifyInstance, deps: ApiDeps): void {
   const { ctx, dto } = deps;
@@ -64,6 +68,19 @@ export function registerStreamerRoutes(g: FastifyInstance, deps: ApiDeps): void 
     const { guildId, id, accountId } = parseInput(accountParams, request.params);
     ensureAccount(ctx, guildId, id, accountId);
     return dto.streamer(await ctx.streamers.removeAccount(guildId, id, accountId, requireAuth(request).actor));
+  });
+
+  // #11 — an admin removes a member's official account link (the member can link again with /link).
+  g.delete('/streamers/:id/links/:platform', { config: { rateLimit: { max: 20, timeWindow: 60_000 } } }, async (request): Promise<StreamerDto> => {
+    const { guildId, id, platform } = parseInput(linkPlatformParams, request.params);
+    ensureStreamer(ctx, guildId, id);
+    const streamer = ctx.streamers.get(guildId, id);
+    const links = ctx.links;
+    if (!links || typeof links.unlink !== 'function') throw new HttpError(503, 'unavailable', 'ربط الحسابات غير متاح في البوت حالياً');
+    if (!ctx.repos.links.get(streamer.discordUserId, platform)) throw notFound('هذا العضو ما عنده ربط رسمي على هذي المنصة');
+    const removed = await discordSafe(request, () => links.unlink(streamer.discordUserId, platform, requireAuth(request).actor));
+    if (!removed) throw notFound('هذا العضو ما عنده ربط رسمي على هذي المنصة');
+    return dto.streamer(ctx.streamers.get(guildId, id));
   });
 
   g.post('/streamers/:id/check', { config: { rateLimit: { max: 20, timeWindow: 60_000 } } }, async (request) => {

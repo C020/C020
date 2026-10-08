@@ -5,6 +5,7 @@ import { useSession } from '../../hooks/useSession';
 import { formatCompact } from '../../lib/format';
 import { Avatar } from '../ui/Avatar';
 import { Menu, MenuItem, MenuSeparator } from '../ui/Menu';
+import { t } from '../../i18n';
 
 export function GuildSwitcher({ current }: { current: GuildSummary }) {
   const me = useSession();
@@ -24,7 +25,7 @@ export function GuildSwitcher({ current }: { current: GuildSummary }) {
           <Avatar src={current.iconUrl} name={current.name} size={36} rounded="xl" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-zinc-100">{current.name}</p>
-            <p className="text-xs text-zinc-500">{formatCompact(current.memberCount)} عضو</p>
+            <p className="text-xs text-zinc-500">{t('guilds.members', { n: formatCompact(current.memberCount) })}</p>
           </div>
           <ChevronsUpDown className="size-4 shrink-0 text-zinc-500" />
         </button>
@@ -32,7 +33,7 @@ export function GuildSwitcher({ current }: { current: GuildSummary }) {
     >
       {(close) => (
         <>
-          <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-500">السيرفرات</p>
+          <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-500">{t('guilds.servers')}</p>
           <div className="max-h-72 overflow-y-auto">
             {me.guilds.map((guild) => (
               <MenuItem
@@ -57,10 +58,10 @@ export function GuildSwitcher({ current }: { current: GuildSummary }) {
               navigate('/guilds');
             }}
           >
-            كل السيرفرات
+            {t('guilds.all')}
           </MenuItem>
           <MenuItem icon={<Plus className="size-4 text-zinc-400" />} href={me.inviteUrl} external onClick={close}>
-            إضافة البوت لسيرفر ثاني
+            {t('guilds.addAnother')}
           </MenuItem>
         </>
       )}

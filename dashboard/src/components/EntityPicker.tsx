@@ -5,6 +5,7 @@ import { cn } from '../lib/cn';
 import { extractSnowflake, isSnowflake } from '../lib/discord';
 import { roleColorHex } from '../lib/format';
 import { Spinner } from './ui/Spinner';
+import { t } from '../i18n';
 
 export interface PickerOption {
   id: string;
@@ -45,7 +46,7 @@ export function EntityPicker({
   loading,
   unavailable,
   placeholder,
-  searchPlaceholder = 'ابحث بالاسم أو الصق الآيدي…',
+  searchPlaceholder = t('picker.search'),
   notFoundText,
   invalid,
   allowClear = true,
@@ -172,7 +173,7 @@ export function EntityPicker({
           {allowClear && trimmedValue && (
             <span
               role="button"
-              aria-label="مسح"
+              aria-label={t('picker.clear')}
               onClick={(e) => {
                 e.stopPropagation();
                 onChange('');
@@ -212,14 +213,14 @@ export function EntityPicker({
           </div>
           {unavailable && (
             <p className="border-b border-white/[0.06] bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-300/90">
-              ما قدرنا نجيب القائمة من ديسكورد الحين، تقدر تلصق الآيدي مباشرة.
+              {t('picker.unavailable')}
             </p>
           )}
           <ul id={listId} role="listbox" className="max-h-72 overflow-y-auto p-1.5">
             {rows.length === 0 && (
               <li className="flex flex-col items-center gap-2 px-3 py-6 text-center text-[13px] text-zinc-500">
                 {emptyIcon}
-                {loading ? 'جاري التحميل…' : query ? 'ما فيه نتائج. تقدر تلصق الآيدي (17–20 رقم).' : 'القائمة فاضية'}
+                {loading ? t('common.loadingEllipsis') : query ? t('picker.noResults') : t('picker.empty')}
               </li>
             )}
             {rows.map((row, index) => {
@@ -234,7 +235,7 @@ export function EntityPicker({
                     className={cn('flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-sm', index === active ? 'bg-white/[0.07]' : '')}
                   >
                     <TriangleAlert className="size-4 shrink-0 text-amber-400" />
-                    <span className="text-zinc-200">استخدام الآيدي مباشرة</span>
+                    <span className="text-zinc-200">{t('picker.useId')}</span>
                     <span dir="ltr" className="ms-auto font-mono text-xs text-zinc-500">
                       {row.id}
                     </span>
@@ -278,7 +279,6 @@ export function EntityPicker({
 
 // ───────────── Discord-specific pickers ─────────────
 
-const ROLE_NOT_FOUND_TEXT = 'هذي الرتبة مو موجودة في السيرفر (يمكن انحذفت).';
 
 function RoleDot({ color }: { color: number }) {
   return <span className="size-3 shrink-0 rounded-full ring-2 ring-black/30" style={{ backgroundColor: roleColorHex(color) }} />;
@@ -292,7 +292,7 @@ export interface RolePickerProps extends Omit<EntityPickerProps, 'options' | 'pl
   placeholder?: string;
 }
 
-export function RolePicker({ roles, guildId, purpose, placeholder = 'اختر رتبة أو الصق الآيدي', ...rest }: RolePickerProps) {
+export function RolePicker({ roles, guildId, purpose, placeholder = t('picker.rolePlaceholder'), ...rest }: RolePickerProps) {
   const options = useMemo<PickerOption[]>(
     () =>
       (roles ?? [])
@@ -304,16 +304,16 @@ export function RolePicker({ roles, guildId, purpose, placeholder = 'اختر ر
             label: role.name,
             icon: <RoleDot color={role.color} />,
             disabled: managed,
-            disabledReason: managed ? 'تابعة لبوت/تكامل' : undefined,
+            disabledReason: managed ? t('picker.managed') : undefined,
             warning:
               purpose === 'assign' && !role.assignable && !role.managed
-                ? 'البوت ما يقدر يعطي هذي الرتبة: رتبته لازم تكون فوقها في ترتيب الرتب (وعنده Manage Roles).'
+                ? t('picker.roleAboveBot')
                 : undefined,
           };
         }),
     [roles, guildId, purpose],
   );
-  return <EntityPicker options={options} placeholder={placeholder} notFoundText={ROLE_NOT_FOUND_TEXT} {...rest} />;
+  return <EntityPicker options={options} placeholder={placeholder} notFoundText={t('picker.roleNotFound')} {...rest} />;
 }
 
 export interface ChannelPickerProps extends Omit<EntityPickerProps, 'options' | 'placeholder' | 'notFoundText'> {
@@ -321,7 +321,7 @@ export interface ChannelPickerProps extends Omit<EntityPickerProps, 'options' | 
   placeholder?: string;
 }
 
-export function ChannelPicker({ channels, placeholder = 'اختر روم أو الصق الآيدي', ...rest }: ChannelPickerProps) {
+export function ChannelPicker({ channels, placeholder = t('picker.channelPlaceholder'), ...rest }: ChannelPickerProps) {
   const options = useMemo<PickerOption[]>(
     () =>
       (channels ?? []).map((channel) => ({
@@ -329,10 +329,10 @@ export function ChannelPicker({ channels, placeholder = 'اختر روم أو ا
         label: channel.name,
         sublabel: channel.parentName ?? undefined,
         icon: channel.type === 'announcement' ? <Megaphone className="size-4 shrink-0 text-zinc-500" /> : <Hash className="size-4 shrink-0 text-zinc-500" />,
-        warning: channel.botCanPost ? undefined : 'البوت ما يقدر يرسل في هذا الروم: اسمح له بـ View Channel و Send Messages و Embed Links (و Attach Files لصور تيك توك).',
+        warning: channel.botCanPost ? undefined : t('picker.channelNoPerms'),
       })),
     [channels],
   );
-  return <EntityPicker options={options} placeholder={placeholder} notFoundText="هذا الروم مو موجود في السيرفر (أو البوت ما يشوفه)." {...rest} />;
+  return <EntityPicker options={options} placeholder={placeholder} notFoundText={t('picker.channelNotFound')} {...rest} />;
 }
 

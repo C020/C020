@@ -16,6 +16,7 @@ import { useInView } from '../hooks/useInView';
 import { useSession } from '../hooks/useSession';
 import { auditCategory, AUDIT_CATEGORY_LABELS, type AuditCategory } from '../lib/audit';
 import { formatWeekday, localDayKey } from '../lib/format';
+import { t } from '../i18n';
 
 type LevelFilter = AuditLevel | 'all';
 
@@ -56,32 +57,32 @@ export default function ActivityPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="النشاط" icon={<Activity className="size-5" />} description="كل اللي سواه البوت والمشرفين: بثوث، رتب، مقاطع، تعديلات وأخطاء" />
+      <PageHeader title={t('nav.activity')} icon={<Activity className="size-5" />} description={t('activity.desc')} />
 
       <Card className="p-4 sm:p-5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <Segmented<LevelFilter>
             value={level}
             onChange={setLevel}
-            ariaLabel="المستوى"
+            ariaLabel={t('activity.level')}
             options={[
-              { value: 'all', label: 'الكل', icon: <ListFilter className="size-3.5" /> },
-              { value: 'info', label: 'معلومات', icon: <Info className="size-3.5" /> },
-              { value: 'warn', label: 'تنبيهات', icon: <TriangleAlert className="size-3.5" /> },
-              { value: 'error', label: 'أخطاء', icon: <CircleAlert className="size-3.5" /> },
+              { value: 'all', label: t('common.all'), icon: <ListFilter className="size-3.5" /> },
+              { value: 'info', label: t('activity.info'), icon: <Info className="size-3.5" /> },
+              { value: 'warn', label: t('activity.warn'), icon: <TriangleAlert className="size-3.5" /> },
+              { value: 'error', label: t('activity.error'), icon: <CircleAlert className="size-3.5" /> },
             ]}
           />
           <Input
             className="lg:ms-auto lg:w-72"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="ابحث في السجل…"
+            placeholder={t('activity.search')}
             leading={<Search className="size-4" />}
           />
         </div>
         {presentCategories.length > 1 && (
           <div className="scrollbar-none mt-3 flex gap-1.5 overflow-x-auto">
-            <CategoryChip active={category === 'all'} onClick={() => setCategory('all')} label="كل الأنواع" />
+            <CategoryChip active={category === 'all'} onClick={() => setCategory('all')} label={t('activity.allKinds')} />
             {presentCategories.map((c) => (
               <CategoryChip key={c} active={category === c} onClick={() => setCategory(c)} label={AUDIT_CATEGORY_LABELS[c]} />
             ))}
@@ -99,8 +100,8 @@ export default function ActivityPage() {
         ) : filtered.length === 0 ? (
           <EmptyState
             icon={<Activity className="size-6" />}
-            title={entries.length === 0 ? 'السجل فاضي' : 'ما فيه نتائج'}
-            description={entries.length === 0 ? 'أول ما يصير شي (بث، تعديل، خطأ) بيطلع هنا مباشرة.' : 'جرّب تغيّر الفلتر أو البحث.'}
+            title={entries.length === 0 ? t('activity.empty') : t('common.noResults')}
+            description={entries.length === 0 ? t('activity.emptyDesc') : t('common.tryOtherFilter')}
           />
         ) : (
           <div>
@@ -120,11 +121,11 @@ export default function ActivityPage() {
         {feed.hasNextPage && (
           <div className="flex justify-center border-t border-white/[0.05] py-4">
             <Button variant="secondary" size="sm" onClick={() => void feed.fetchNextPage()} loading={feed.isFetchingNextPage}>
-              تحميل المزيد
+              {t('common.loadMore')}
             </Button>
           </div>
         )}
-        {!feed.hasNextPage && entries.length > 0 && <p className="border-t border-white/[0.05] py-4 text-center text-xs text-zinc-600">وصلت لآخر السجل</p>}
+        {!feed.hasNextPage && entries.length > 0 && <p className="border-t border-white/[0.05] py-4 text-center text-xs text-zinc-600">{t('activity.end')}</p>}
       </Card>
     </div>
   );

@@ -4,6 +4,7 @@ import type { DiagnosticsDto } from '../api/types';
 import { cn } from '../lib/cn';
 import { problemFix, problemHint } from '../lib/problems';
 import { buttonClasses } from './ui/Button';
+import { t } from '../i18n';
 
 export interface DiagnosticsBannerProps {
   diagnostics: DiagnosticsDto;
@@ -26,12 +27,12 @@ export function DiagnosticsBanner({ diagnostics, basePath, inviteUrl, onRetry, c
         errors > 0 ? 'bg-rose-500/[0.06] ring-rose-500/20' : 'bg-amber-500/[0.06] ring-amber-500/20',
         className,
       )}
-      aria-label="مشاكل تحتاج انتباه"
+      aria-label={t('diagnostics.aria')}
     >
       <div className="flex items-center gap-2 px-4 pt-4 sm:px-5">
         {errors > 0 ? <CircleAlert className="size-5 text-rose-300" /> : <TriangleAlert className="size-5 text-amber-300" />}
         <h2 className="text-sm font-semibold text-zinc-100">
-          {errors > 0 ? `فيه ${problems.length === 1 ? 'مشكلة تحتاج' : `${problems.length} مشاكل تحتاج`} حل` : 'تنبيهات بسيطة'}
+          {errors > 0 ? t('diagnostics.problems', { count: problems.length }) : t('diagnostics.minor')}
         </h2>
       </div>
       <ul className="divide-y divide-white/[0.05] px-4 pb-2 sm:px-5">

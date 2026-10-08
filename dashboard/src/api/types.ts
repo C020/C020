@@ -9,6 +9,15 @@ export type {
   AccountDto,
   AccountInput,
   ApiError,
+  ApplicationDto,
+  ApproveApplicationRequest,
+  ApproveApplicationResponse,
+  Capabilities,
+  ManualPostPreviewDto,
+  ManualPostRequest,
+  SessionDetailDto,
+  StreamerStatsDto,
+  ViewerSampleDto,
   ContentDto,
   CreateStreamerRequest,
   DiagnosticsDto,
@@ -61,3 +70,15 @@ export interface ContentEventData {
 }
 
 export type MessageType = 'live' | 'summary' | 'content';
+
+export type { ApplicationStatus, GuildFeatures, GuildFeaturesPatch, LinkPlatform } from '../../../src/db/models';
+export type FeatureLanguage = SettingsDto['features']['language'];
+
+/** Payload of the realtime "application" event (#9). */
+export interface ApplicationEventData {
+  applicationId: number;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+}
+
+export type PanelKind = 'notify' | 'apply';
+export type StatsRange = 7 | 30 | 90 | 365;

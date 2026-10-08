@@ -1,12 +1,11 @@
 import { useEffect, type ReactNode } from 'react';
 import { useOptionalGuild } from '../hooks/useGuild';
-
-const APP_TITLE = 'لوحة تحكم البثوث';
+import { t } from '../i18n';
 
 export function PageHeader({ title, description, actions, icon }: { title: string; description?: ReactNode; actions?: ReactNode; icon?: ReactNode }) {
   const guildName = useOptionalGuild()?.guild.name;
   useEffect(() => {
-    document.title = [title, guildName, APP_TITLE].filter(Boolean).join(' · ');
+    document.title = [title, guildName, t('app.documentTitle')].filter(Boolean).join(' · ');
   }, [title, guildName]);
 
   return (

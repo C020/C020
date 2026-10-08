@@ -9,6 +9,7 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import Fastify, { LogController, type FastifyBaseLogger, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { AppContext } from '../app/context.js';
 import { childLogger } from '../core/logger.js';
+import type { LinkService } from '../services/linkService.js';
 import { API_RATE_LIMIT, apiPlugin, dashboardDisabledMessage } from './api.js';
 import { AuthService, registerAuthRoutes } from './auth.js';
 import { DiscordOAuthClient } from './discordOAuth.js';
@@ -16,6 +17,7 @@ import { DtoMapper } from './dto.js';
 import { HttpError, installErrorHandler } from './httpErrors.js';
 import { MemberCache } from './memberCache.js';
 import type { ApiDeps } from './routes/deps.js';
+import { registerLinkRoutes } from './routes/link.js';
 import { helmetOptions, TRUSTED_PROXIES } from './security.js';
 import { SseHub } from './sse.js';
 import { registerStatic, spaFallback } from './static.js';
@@ -77,6 +79,10 @@ export async function createWebServer(ctx: AppContext, options: WebServerOptions
   }));
 
   await app.register(webhooksPlugin, { ctx });
+
+  // #11 — public OAuth pages for optional account linking (independent of the dashboard login).
+  const linkService = asLinkService(ctx.links);
+  if (linkService) registerLinkRoutes(app, ctx, linkService);
 
   const timers: NodeJS.Timeout[] = [];
   let sse: SseHub | null = null;
@@ -163,6 +169,15 @@ function acceptEmptyJsonBodies(app: FastifyInstance): void {
     }
     defaultParser(request, text, done);
   });
+}
+
+/** ctx.links is typed as the API; the OAuth routes need the concrete LinkService (flow methods). */
+export function asLinkService(links: unknown): LinkService | null {
+  if (typeof links !== 'object' || links === null) return null;
+  const l = links as Record<string, unknown>;
+  return typeof l.authorizeRedirect === 'function' && typeof l.complete === 'function' && typeof l.languageOfState === 'function'
+    ? (links as LinkService)
+    : null;
 }
 
 function safeReady(ctx: AppContext): boolean {

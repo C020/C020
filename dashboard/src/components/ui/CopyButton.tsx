@@ -2,8 +2,9 @@ import { Check, Copy } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useCopy } from '../../hooks/useCopy';
 import { cn } from '../../lib/cn';
+import { t } from '../../i18n';
 
-export function CopyButton({ value, label = 'نسخ', className }: { value: string; label?: string; className?: string }) {
+export function CopyButton({ value, label = t('common.copy'), className }: { value: string; label?: string; className?: string }) {
   const copy = useCopy();
   const [done, setDone] = useState(false);
   useEffect(() => {

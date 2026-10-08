@@ -1,5 +1,7 @@
-import { CalendarClock, Clock, ExternalLink, Eye, Gamepad2, MessageSquare, PlayCircle, TrendingUp } from 'lucide-react';
+import { CalendarClock, ChartLine, Clock, ExternalLink, Eye, Gamepad2, MessageSquare, PlayCircle, TrendingUp } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { Link } from 'react-router-dom';
+import { useOptionalGuild } from '../hooks/useGuild';
 import type { SessionDto } from '../api/types';
 import { useNow } from '../hooks/useNow';
 import { cn } from '../lib/cn';
@@ -8,6 +10,7 @@ import { PLATFORM_META } from '../lib/platforms';
 import { PlatformBadge, PlatformIcon } from './PlatformIcon';
 import { StreamerAvatar } from './StreamerAvatar';
 import { Badge, LiveDot } from './ui/Badge';
+import { t } from '../i18n';
 
 const CATEGORY_COLORS = ['#8b5cf6', '#06b6d4', '#f59e0b', '#ec4899', '#10b981', '#6366f1', '#f97316'];
 
@@ -16,11 +19,11 @@ function sessionDuration(session: SessionDto, now: number): number {
 }
 
 /** Compact one-line session (overview feed). */
-export function SessionRow({ session }: { session: SessionDto }) {
+export function SessionRow({ session, href }: { session: SessionDto; href?: string }) {
   const now = useNow(30_000);
   const live = session.status === 'live';
-  return (
-    <div className="flex items-center gap-3 py-3">
+  const body = (
+    <>
       <StreamerAvatar name={session.streamer.displayName} avatarUrl={session.streamer.avatarUrl} discordUserId={session.streamer.discordUserId} live={live} size={36} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -37,14 +40,23 @@ export function SessionRow({ session }: { session: SessionDto }) {
       </div>
       <div className="shrink-0 text-end">
         <p className="text-[13px] tabular-nums text-zinc-300">{formatDurationShort(sessionDuration(session, now))}</p>
-        <p className="text-[11px] text-zinc-500">{live ? <span className="text-rose-300">لايف الحين</span> : formatRelative(session.endedAt ?? session.startedAt, now)}</p>
+        <p className="text-[11px] text-zinc-500">{live ? <span className="text-rose-300">{t('session.liveNow')}</span> : formatRelative(session.endedAt ?? session.startedAt, now)}</p>
       </div>
-    </div>
+    </>
   );
+  if (href) {
+    return (
+      <Link to={href} title={t('session.details')} className="-mx-2 flex items-center gap-3 rounded-xl px-2 py-3 transition-colors hover:bg-white/[0.03]">
+        {body}
+      </Link>
+    );
+  }
+  return <div className="flex items-center gap-3 py-3">{body}</div>;
 }
 
 /** Full session card with categories breakdown, VODs and stats (history page). */
 export function SessionCard({ session }: { session: SessionDto }) {
+  const basePath = useOptionalGuild()?.basePath;
   const now = useNow(live(session) ? 1000 : 60_000);
   const duration = sessionDuration(session, now);
   const totalCategorySeconds = session.categories.reduce((n, c) => n + c.seconds, 0);
@@ -60,16 +72,16 @@ export function SessionCard({ session }: { session: SessionDto }) {
             {live(session) ? (
               <Badge tone="live">
                 <LiveDot />
-                لايف الحين
+                {t('session.liveNow')}
               </Badge>
             ) : (
-              <Badge tone="neutral">انتهى</Badge>
+              <Badge tone="neutral">{t('session.ended')}</Badge>
             )}
           </div>
-          <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500" title={formatDateTime(session.startedAt)}>
-            <CalendarClock className="size-3.5" />
+          <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-zinc-500" title={formatDateTime(session.startedAt)}>
+            <CalendarClock className="size-3.5 shrink-0" />
             {formatDateTime(session.startedAt)}
-            {session.endedAt && <span className="text-zinc-600">← {formatRelative(session.endedAt, now)}</span>}
+            {session.endedAt && <span className="text-zinc-600">{t('session.endedWhen', { when: formatRelative(session.endedAt, now) })}</span>}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -82,15 +94,15 @@ export function SessionCard({ session }: { session: SessionDto }) {
       {lastTitle && (
         <p className="mt-3 line-clamp-2 text-[13.5px] leading-relaxed text-zinc-300" dir="auto">
           {lastTitle}
-          {session.titles.length > 1 && <span className="ms-2 text-xs text-zinc-500">(+{session.titles.length - 1} عناوين)</span>}
+          {session.titles.length > 1 && <span className="ms-2 text-xs text-zinc-500">{t('session.moreTitles', { count: session.titles.length - 1 })}</span>}
         </p>
       )}
 
       <dl className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat icon={<Clock className="size-4" />} label="المدة" value={formatDurationLong(duration)} />
-        <Stat icon={<TrendingUp className="size-4" />} label="أعلى مشاهدين" value={formatCompact(session.peakViewers)} />
-        <Stat icon={<Eye className="size-4" />} label="متوسط المشاهدين" value={session.avgViewers == null ? '—' : formatCompact(Math.round(session.avgViewers))} />
-        <Stat icon={<Gamepad2 className="size-4" />} label="الأقسام" value={String(session.categories.length)} />
+        <Stat icon={<Clock className="size-4" />} label={t('session.duration')} value={formatDurationLong(duration)} />
+        <Stat icon={<TrendingUp className="size-4" />} label={t('session.peak')} value={formatCompact(session.peakViewers)} />
+        <Stat icon={<Eye className="size-4" />} label={t('session.avg')} value={session.avgViewers == null ? '—' : formatCompact(Math.round(session.avgViewers))} />
+        <Stat icon={<Gamepad2 className="size-4" />} label={t('session.categories')} value={String(session.categories.length)} />
       </dl>
 
       {session.categories.length > 0 && (
@@ -122,8 +134,17 @@ export function SessionCard({ session }: { session: SessionDto }) {
         </div>
       )}
 
-      {(session.vodUrls.length > 0 || session.messageUrl) && (
+      {(session.vodUrls.length > 0 || session.messageUrl || basePath) && (
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-3">
+          {basePath && (
+            <Link
+              to={`${basePath}/sessions/${session.id}`}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-violet-500/10 px-2.5 text-xs text-violet-200 ring-1 ring-inset ring-violet-400/20 transition-colors hover:bg-violet-500/20"
+            >
+              <ChartLine className="size-3.5" />
+              {t('session.details')}
+            </Link>
+          )}
           {session.vodUrls.map((vod) => (
             <a
               key={vod.url}
@@ -133,14 +154,14 @@ export function SessionCard({ session }: { session: SessionDto }) {
               className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white/[0.04] px-2.5 text-xs text-zinc-300 ring-1 ring-inset ring-white/[0.08] transition-colors hover:bg-white/[0.08]"
             >
               <PlayCircle className="size-3.5" />
-              إعادة {PLATFORM_META[vod.platform].label}
+              {t('session.replay', { platform: PLATFORM_META[vod.platform].label })}
               <PlatformIcon platform={vod.platform} className="size-3.5" />
             </a>
           ))}
           {session.messageUrl && (
             <a href={session.messageUrl} target="_blank" rel="noopener noreferrer" className="ms-auto inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200">
               <MessageSquare className="size-3.5" />
-              رسالة ديسكورد
+              {t('session.discordMessage')}
               <ExternalLink className="size-3" />
             </a>
           )}
@@ -161,7 +182,7 @@ function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: s
         {icon}
         {label}
       </dt>
-      <dd className="mt-1 truncate text-sm font-semibold tabular-nums text-zinc-100">{value}</dd>
+      <dd className="mt-1 break-words text-sm font-semibold leading-snug tabular-nums text-zinc-100">{value}</dd>
     </div>
   );
 }

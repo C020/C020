@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../../app/context.js';
 import type { DiscordGuildInfo } from '../../services/ports.js';
-import type { GuildSummary, MeResponse, ProviderStatus, SystemStatus } from '../../shared/api.js';
+import type { Capabilities, GuildSummary, MeResponse, ProviderStatus, SystemStatus } from '../../shared/api.js';
 import { toResolvePreview } from '../dto.js';
 import { HttpError } from '../httpErrors.js';
 import { parseInput, resolveSchema } from '../schemas.js';
@@ -30,6 +30,7 @@ export function registerMeRoutes(api: FastifyInstance, deps: ApiDeps): void {
       guilds: deps.auth.accessibleGuilds(auth).map(toGuildSummary),
       bot: bot ? { ...bot, ready: attempt(() => ctx.discord.isReady(), false) } : null,
       inviteUrl: attempt(() => ctx.discord.inviteUrl(), fallbackInviteUrl(ctx)),
+      capabilities: capabilitiesOf(ctx),
     };
   });
 
@@ -94,6 +95,17 @@ export function systemStatus(ctx: AppContext, nowMs: number, options: { detailed
     webhooksEnabled: ctx.config.webhooksEnabled,
     publicUrl: ctx.config.PUBLIC_URL ?? null,
     providers,
+  };
+}
+
+/** What this bot instance can do (v2 settings the dashboard offers as available). Never throws. */
+export function capabilitiesOf(ctx: AppContext): Capabilities {
+  const linkAvailable = (platform: 'twitch' | 'tiktok'): boolean =>
+    attempt(() => (typeof ctx.links?.isAvailable === 'function' ? ctx.links.isAvailable(platform) === true : false), false);
+  return {
+    presenceIntent: attempt(() => (typeof ctx.discord.presenceIntentEnabled === 'function' ? ctx.discord.presenceIntentEnabled() === true : false), false),
+    linking: { twitch: linkAvailable('twitch'), tiktok: linkAvailable('tiktok') },
+    kickAutoContent: ctx.config.KICK_UNOFFICIAL_CONTENT === true,
   };
 }
 

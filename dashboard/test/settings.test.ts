@@ -17,6 +17,8 @@ function settings(overrides: Partial<SettingsDto> = {}): SettingsDto {
     platformsEnabled: ['twitch', 'kick', 'youtube', 'tiktok'],
     contentKinds: ['video', 'short', 'vod', 'highlight', 'clip'],
     templates: {},
+    // Not used by the settings helpers under test.
+    features: {} as SettingsDto['features'],
     options: {
       reconnectMergeMinutes: 10,
       liveUpdateMinutes: 5,

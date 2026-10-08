@@ -10,7 +10,7 @@ import { ChannelNotFoundError, ProviderNotConfiguredError, RateLimitedError, Val
 import { childLogger } from '../core/logger.js';
 import type { ContentKind, Platform, ResolvedChannel } from '../core/types.js';
 import { CONTENT_KINDS, isContentKind, isPlatform, PLATFORM_LABELS } from '../core/types.js';
-import type { AccountWithChannel, Streamer, StreamerWithAccounts } from '../db/models.js';
+import type { AccountWithChannel, Streamer, StreamerWithAccounts, Templates, TemplateSpec } from '../db/models.js';
 import type { Repositories } from '../db/repositories.js';
 import type { PlatformProvider } from '../platforms/types.js';
 import type { AccountInput, CreateStreamerRequest, UpdateAccountRequest, UpdateStreamerRequest } from '../shared/api.js';
@@ -178,10 +178,11 @@ export class StreamerService implements StreamerServiceApi {
   async update(guildId: string, streamerId: number, patch: UpdateStreamerRequest, actor: string): Promise<StreamerWithAccounts> {
     const current = this.get(guildId, streamerId);
     if (!patch || typeof patch !== 'object') throw new ValidationError('بيانات الطلب ناقصة');
-    const changes: Partial<Pick<Streamer, 'displayName' | 'notes' | 'color' | 'enabled'>> = {};
+    const changes: Partial<Pick<Streamer, 'displayName' | 'notes' | 'color' | 'enabled' | 'templates'>> = {};
     if (patch.displayName !== undefined) changes.displayName = validateDisplayName(patch.displayName);
     if (patch.notes !== undefined) changes.notes = validateNotes(patch.notes);
     if (patch.color !== undefined) changes.color = validateColor(patch.color);
+    if (patch.templates !== undefined) changes.templates = validateStreamerTemplates(patch.templates);
     if (patch.enabled !== undefined) {
       if (typeof patch.enabled !== 'boolean') throw new ValidationError('قيمة التفعيل غير صحيحة', 'enabled');
       changes.enabled = patch.enabled;
@@ -562,6 +563,48 @@ function validateNotes(value: unknown): string | null {
   const notes = value.trim();
   if (notes.length > MAX_NOTES_LENGTH) throw new ValidationError(`الملاحظات طويلة، الحد ${MAX_NOTES_LENGTH} حرف`, 'notes');
   return notes || null;
+}
+
+/** Discord limits per template field (content, embed title/description/footer). */
+export const TEMPLATE_FIELD_LIMITS = { content: 2000, title: 256, description: 4096, footer: 2048 } as const;
+const TEMPLATE_TYPES = ['live', 'summary', 'content'] as const;
+
+/**
+ * #5 — per-streamer template overrides. The whole object is replaced. Per field: a string (an empty string means
+ * "empty", like the guild template) overrides, undefined/missing inherits; color: integer overrides, null inherits.
+ * A type without any override is dropped.
+ */
+export function validateStreamerTemplates(value: unknown): Templates {
+  if (value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw new ValidationError('القوالب غير صحيحة', 'templates');
+  const raw = value as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    if (!(TEMPLATE_TYPES as readonly string[]).includes(key)) throw new ValidationError('نوع قالب غير معروف', `templates.${key}`);
+  }
+  const out: Templates = {};
+  for (const type of TEMPLATE_TYPES) {
+    const spec = raw[type];
+    if (spec === undefined || spec === null) continue;
+    if (typeof spec !== 'object' || Array.isArray(spec)) throw new ValidationError('القالب غير صحيح', `templates.${type}`);
+    const src = spec as Record<string, unknown>;
+    const clean: TemplateSpec = {};
+    for (const field of Object.keys(TEMPLATE_FIELD_LIMITS) as Array<keyof typeof TEMPLATE_FIELD_LIMITS>) {
+      const v = src[field];
+      if (v === undefined || v === null) continue;
+      if (typeof v !== 'string') throw new ValidationError('حقل القالب لازم يكون نص', `templates.${type}.${field}`);
+      const max = TEMPLATE_FIELD_LIMITS[field];
+      if (v.length > max) throw new ValidationError(`النص طويل، الحد ${max} حرف`, `templates.${type}.${field}`);
+      clean[field] = v;
+    }
+    if (src.color !== undefined && src.color !== null) {
+      if (typeof src.color !== 'number' || !Number.isInteger(src.color) || src.color < 0 || src.color > 0xffffff) {
+        throw new ValidationError('اللون غير صحيح', `templates.${type}.color`);
+      }
+      clean.color = src.color;
+    }
+    if (Object.keys(clean).length > 0) out[type] = clean;
+  }
+  return out;
 }
 
 function validateColor(value: unknown): number | null {

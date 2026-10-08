@@ -1,6 +1,12 @@
 @import 'tailwindcss';
 
 @custom-variant dark (&:where(.dark, .dark *));
+/*
+ * ltr:/rtl: follow the PAGE direction (<html dir>, switched by the language toggle), not the nearest
+ * dir attribute — so local dir="ltr" islands (IDs, URLs, handles) can still align to the page's start.
+ */
+@custom-variant ltr (&:where(html[dir='ltr'], html[dir='ltr'] *));
+@custom-variant rtl (&:where(html:not([dir='ltr']), html:not([dir='ltr']) *));
 
 @theme {
   --font-sans: 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, system-ui, sans-serif;
@@ -46,7 +52,7 @@
       transform: translateY(0) scale(1);
     }
   }
-  /* "end" is the left edge in RTL. */
+  /* "end" is the left edge in RTL; LTR layouts pair these with ltr: variants (see Drawer/AppShell). */
   @keyframes slide-in-end {
     from {
       transform: translateX(-100%);

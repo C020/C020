@@ -11,6 +11,7 @@ import { useGuildEvents } from '../hooks/useGuildEvents';
 import { writeStorage } from '../hooks/useLocalStorage';
 import { LAST_GUILD_KEY, useRealtimeToasts } from '../hooks/usePreferences';
 import { useSession } from '../hooks/useSession';
+import { t } from '../i18n';
 
 export function GuildLayout() {
   const { guildId = '' } = useParams();
@@ -22,11 +23,11 @@ export function GuildLayout() {
       <AppShell>
         <EmptyState
           icon={<ShieldX className="size-6" />}
-          title="ما عندك وصول لهذا السيرفر"
-          description="يا إن البوت مو موجود فيه، أو ما عندك صلاحية Manage Server فيه."
+          title={t('guildLayout.noAccess')}
+          description={t('guildLayout.noAccessDesc')}
           action={
             <Link to="/guilds" className={buttonClasses('secondary', 'md')}>
-              اختر سيرفر ثاني
+              {t('guildLayout.pickAnother')}
             </Link>
           }
         />
@@ -59,7 +60,7 @@ function GuildScope({ guild }: { guild: GuildSummary }) {
 
 export function PageSkeleton() {
   return (
-    <div className="space-y-6" role="status" aria-label="جاري التحميل">
+    <div className="space-y-6" role="status" aria-label={t('common.loading')}>
       <div className="space-y-2">
         <Skeleton className="h-7 w-48" />
         <Skeleton className="h-4 w-72" />

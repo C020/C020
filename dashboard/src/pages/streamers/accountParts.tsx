@@ -9,7 +9,8 @@ import { ToggleChip } from '../../components/ui/Chip';
 import { Segmented } from '../../components/ui/Segmented';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { cn } from '../../lib/cn';
-import { CONTENT_KIND_HINTS, CONTENT_KIND_LABELS_AR, PLATFORM_META, PLATFORMS } from '../../lib/platforms';
+import { CONTENT_KIND_HINTS, CONTENT_KIND_LABELS, PLATFORM_META, PLATFORMS } from '../../lib/platforms';
+import { formatList, t } from '../../i18n';
 
 export type ResolveStatus = 'idle' | 'typing' | 'checking' | 'ok' | 'not_found' | 'invalid' | 'unconfigured' | 'rate_limited' | 'error';
 
@@ -31,19 +32,19 @@ export function useResolveState(platform: Platform, input: string): ResolveState
   const query = useResolve(platform, debounced);
 
   if (!trimmed) return { status: 'idle', preview: null, message: null };
-  if (trimmed.length < 2) return { status: 'invalid', preview: null, message: 'قصير مرة' };
+  if (trimmed.length < 2) return { status: 'invalid', preview: null, message: t('accounts.tooShort') };
   if (debounced !== trimmed) return { status: 'typing', preview: null, message: null };
   if (query.isPending || (query.isFetching && !query.data)) return { status: 'checking', preview: null, message: null };
   if (query.data) return { status: 'ok', preview: query.data, message: null };
   const error = query.error;
   if (isApiError(error)) {
-    if (error.status === 404) return { status: 'not_found', preview: null, message: error.message || 'الحساب غير موجود على المنصة' };
+    if (error.status === 404) return { status: 'not_found', preview: null, message: error.message || t('accounts.notFound') };
     if (error.code === 'provider_not_configured') return { status: 'unconfigured', preview: null, message: error.message };
     if (error.status === 400) return { status: 'invalid', preview: null, message: error.message };
     if (error.status === 429) return { status: 'rate_limited', preview: null, message: error.message };
     return { status: 'error', preview: null, message: error.message };
   }
-  return { status: 'error', preview: null, message: 'ما قدرنا نتحقق من الحساب الحين' };
+  return { status: 'error', preview: null, message: t('accounts.checkFailed') };
 }
 
 export function ResolveStatusView({ state, compact = false }: { state: ResolveState; compact?: boolean }) {
@@ -55,7 +56,7 @@ export function ResolveStatusView({ state, compact = false }: { state: ResolveSt
       return (
         <p className="flex items-center gap-1.5 text-xs text-zinc-500">
           <Loader2 className="size-3.5 animate-spin" />
-          نتحقق من الحساب…
+          {t('accounts.checking')}
         </p>
       );
     case 'ok': {
@@ -67,11 +68,11 @@ export function ResolveStatusView({ state, compact = false }: { state: ResolveSt
             <p className="truncate text-[13px] font-medium text-zinc-100" dir="auto">
               {p.displayName}
             </p>
-            <p dir="ltr" className="truncate text-end text-[11px] text-zinc-500">
+            <p dir="ltr" className="truncate text-right text-[11px] ltr:text-left text-zinc-500">
               {p.handle}
             </p>
           </div>
-          <a href={p.url} target="_blank" rel="noopener noreferrer" className="text-zinc-500 hover:text-zinc-200" aria-label="فتح الحساب">
+          <a href={p.url} target="_blank" rel="noopener noreferrer" className="text-zinc-500 hover:text-zinc-200" aria-label={t('accounts.open')}>
             <ExternalLink className="size-3.5" />
           </a>
           <CircleCheck className="size-4 shrink-0 text-emerald-400" />
@@ -89,7 +90,7 @@ export function ResolveStatusView({ state, compact = false }: { state: ResolveSt
       return (
         <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-300/90">
           <Timer className="mt-px size-3.5 shrink-0" />
-          {state.message} (تقدر تحفظ، والبوت بيتحقق وقت الحفظ)
+          {state.message} {t('accounts.canStillSave')}
         </p>
       );
     default:
@@ -108,7 +109,7 @@ export function PlatformPicker({ value, onChange }: { value: Platform; onChange:
       size="sm"
       value={value}
       onChange={onChange}
-      ariaLabel="المنصة"
+      ariaLabel={t('accounts.platform')}
       options={PLATFORMS.map((p) => ({
         value: p,
         label: PLATFORM_META[p].label,
@@ -146,8 +147,8 @@ export function ContentKindsOverride({
           onChange(mode === 'custom' ? (value ?? inherited) : null);
         }}
         options={[
-          { value: 'inherit', label: 'حسب إعدادات السيرفر', disabled },
-          { value: 'custom', label: 'مخصص', disabled },
+          { value: 'inherit', label: t('accounts.kindsInherit'), disabled },
+          { value: 'custom', label: t('tpl.custom'), disabled },
         ]}
       />
       {custom ? (
@@ -163,15 +164,15 @@ export function ContentKindsOverride({
                 title={CONTENT_KIND_HINTS[kind]}
                 onToggle={() => onChange(selected ? (value ?? []).filter((k) => k !== kind) : [...(value ?? []), kind])}
               >
-                {CONTENT_KIND_LABELS_AR[kind]}
+                {CONTENT_KIND_LABELS[kind]}
               </ToggleChip>
             );
           })}
-          {(value ?? []).length === 0 && <span className="self-center text-[11px] text-amber-300/90">ولا نوع: ما راح تنرسل مقاطع لهذا الحساب</span>}
+          {(value ?? []).length === 0 && <span className="self-center text-[11px] text-amber-300/90">{t('accounts.noKinds')}</span>}
         </div>
       ) : (
         <p className="text-[11.5px] text-zinc-500">
-          {inherited.length > 0 ? `حالياً: ${inherited.map((k) => CONTENT_KIND_LABELS_AR[k]).join('، ')}` : 'إعدادات السيرفر ما فيها أنواع تنطبق على هذي المنصة'}
+          {inherited.length > 0 ? t('accounts.currently', { list: formatList(inherited.map((k) => CONTENT_KIND_LABELS[k])) }) : t('accounts.noInherited')}
         </p>
       )}
     </div>

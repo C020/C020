@@ -1,15 +1,17 @@
 import { DEFAULT_TEMPLATES as SHARED_DEFAULTS } from '../../../src/shared/templates';
 import type { TemplateSpec } from '../api/types';
+import { dictionary, t, type MessageKey } from '../i18n/core';
 
 export type TemplateType = 'live' | 'summary' | 'content';
 export type TemplateTextField = 'content' | 'title' | 'description' | 'footer';
 
 export const TEMPLATE_TYPES: TemplateType[] = ['live', 'summary', 'content'];
 
-export const TEMPLATE_TYPE_LABELS: Record<TemplateType, { label: string; description: string }> = {
-  live: { label: 'إشعار البث', description: 'الرسالة اللي تنرسل أول ما الستريمر يبدأ بث، وتتحدّث تلقائياً وهو لايف.' },
-  summary: { label: 'ملخص البث', description: 'نفس رسالة البث تتحول لملخص بعد ما يخلص (المدة، المشاهدين، الألعاب، روابط الإعادة).' },
-  content: { label: 'إشعار المقاطع', description: 'الرسالة اللي تنرسل لما ينزل مقطع جديد (فيديو، شورتس، كليب، تسجيل بث…).' },
+/** Labels are translated on read (getters), so the table always follows the current language. */
+export const TEMPLATE_TYPE_LABELS: Readonly<Record<TemplateType, { readonly label: string; readonly description: string }>> = {
+  live: { get label() { return t('templates.type.live'); }, get description() { return t('templates.type.liveDesc'); } },
+  summary: { get label() { return t('templates.type.summary'); }, get description() { return t('templates.type.summaryDesc'); } },
+  content: { get label() { return t('templates.type.content'); }, get description() { return t('templates.type.contentDesc'); } },
 };
 
 /** Discord hard limits per field (characters). */
@@ -20,11 +22,11 @@ export const TEMPLATE_LIMITS: Record<TemplateTextField, number> = {
   footer: 2048,
 };
 
-export const TEMPLATE_FIELD_LABELS: Record<TemplateTextField, { label: string; hint: string }> = {
-  content: { label: 'نص الرسالة', hint: 'يظهر فوق الـ Embed. المنشن ينضاف تلقائياً حسب إعدادات المنشن.' },
-  title: { label: 'العنوان', hint: 'عنوان الـ Embed (بدون تنسيق ماركداون).' },
-  description: { label: 'الوصف', hint: 'يدعم تنسيق ديسكورد: **عريض** و *مائل* و [روابط](https://…).' },
-  footer: { label: 'التذييل', hint: 'سطر صغير أسفل الـ Embed.' },
+export const TEMPLATE_FIELD_LABELS: Readonly<Record<TemplateTextField, { readonly label: string; readonly hint: string }>> = {
+  content: { get label() { return t('templates.field.content'); }, get hint() { return t('templates.field.contentHint'); } },
+  title: { get label() { return t('templates.field.title'); }, get hint() { return t('templates.field.titleHint'); } },
+  description: { get label() { return t('templates.field.description'); }, get hint() { return t('templates.field.descriptionHint'); } },
+  footer: { get label() { return t('templates.field.footer'); }, get hint() { return t('templates.field.footerHint'); } },
 };
 
 /** The bot's built-in defaults (shared source), used as placeholders and as the preview fallback for cleared fields. */
@@ -104,4 +106,13 @@ export function unknownVariables(text: string, known: ReadonlyArray<{ key: strin
     if (key && !keys.has(key.toLowerCase())) found.add(key);
   }
   return [...found];
+}
+
+/**
+ * Description of a template variable in the dashboard language. Falls back to the shared (Arabic)
+ * description for variables added to TEMPLATE_VARIABLES without a dictionary entry yet.
+ */
+export function variableDescription(type: TemplateType, variable: { key: string; description: string }): string {
+  const key = `tplVar.${type}.${variable.key}`;
+  return key in dictionary('ar') ? t(key as MessageKey) : variable.description;
 }

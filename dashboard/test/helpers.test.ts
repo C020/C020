@@ -82,11 +82,13 @@ describe('streamer list filter', () => {
     isLive: false,
     inGuild: true,
     accounts: [],
+    templates: {},
+    links: [],
     stats: { sessions30d: 0, hours30d: id, peakViewers30d: 0 },
     createdAt: `2026-10-0${id}T00:00:00Z`,
     ...extra,
   });
-  const account = { id: 1, platform: 'kick' as const, channelId: 1, handle: 'zed_live', displayName: 'Zed', avatarUrl: null, url: '', notifyLive: true, notifyContent: true, contentKinds: null, isLive: false, snapshot: null, lastCheckedAt: null, lastError: null };
+  const account = { id: 1, platform: 'kick' as const, channelId: 1, handle: 'zed_live', displayName: 'Zed', avatarUrl: null, url: '', notifyLive: true, notifyContent: true, contentKinds: null, isLive: false, snapshot: null, lastCheckedAt: null, lastError: null, verified: false };
   const list = [
     streamer(1, 'Bravo', { accounts: [account] }),
     streamer(2, 'Alpha', { isLive: true, accounts: [{ ...account, id: 2, platform: 'twitch' as const, handle: 'alpha' }] }),

@@ -47,6 +47,7 @@ export function registerGuildRoutes(g: FastifyInstance, deps: ApiDeps): void {
         liveNow: liveViews.length,
         sessionsLast7d: ctx.repos.sessions.totals(guildId, since7d).reduce((n, r) => n + r.sessions, 0),
         contentLast7d: ctx.repos.content.recentForGuild(guildId, 500).filter((c) => c.firstSeenAt >= since7d).length,
+        pendingApplications: safe(() => ctx.repos.applications.countPending(guildId)) ?? 0,
       },
       liveNow: liveViews.map((v) => dto.liveNow(v)),
       recentSessions: ctx.repos.sessions

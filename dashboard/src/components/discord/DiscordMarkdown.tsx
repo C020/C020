@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState, type ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { customEmojiUrl } from '../../lib/discord';
 import { formatDiscordTimestamp, parseInline, parseMarkdown, type BlockNode, type InlineNode } from '../../lib/discordMarkdown';
+import { t } from '../../i18n';
 
 export interface MentionResolver {
   user?: (id: string) => string | null;
@@ -67,11 +68,11 @@ function renderInline(nodes: InlineNode[], ctx: RenderContext): ReactNode[] {
           const role = ctx.resolver.role?.(node.id);
           return (
             <span key={i} className="rounded px-0.5 font-medium" style={{ color: role?.color ?? '#c9cdfb', backgroundColor: `${role?.color ?? '#5865f2'}26` }}>
-              @{role?.name ?? 'رتبة'}
+              @{role?.name ?? t('discord.role')}
             </span>
           );
         }
-        const label = node.kind === 'user' ? `@${ctx.resolver.user?.(node.id) ?? 'مستخدم'}` : `#${ctx.resolver.channel?.(node.id) ?? 'روم'}`;
+        const label = node.kind === 'user' ? `@${ctx.resolver.user?.(node.id) ?? t('discord.user')}` : `#${ctx.resolver.channel?.(node.id) ?? t('discord.channel')}`;
         return (
           <span key={i} className="rounded bg-[#5865f2]/30 px-0.5 font-medium text-[#c9cdfb]">
             {label}

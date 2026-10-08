@@ -182,6 +182,27 @@ interface SeedRecord {
   /** The channel had no content at all when it was seeded (and has had none since). */
   empty: boolean;
 }
+/** #6 — clips are re-evaluated (onContentUpdate) only while they are this young (since first seen). */
+export const CLIP_RECHECK_WINDOW_MS = 24 * 3_600_000;
+
+/**
+ * #6 — should a stored (not newly inserted) item be handed to onContentUpdate? Only clips first seen less than
+ * 24h ago. Announced clips are included too: a clip announced in one guild may still be held back by another
+ * guild's filters (the content service keeps per-guild state and ignores everything else).
+ */
+export function wantsContentUpdate(item: ContentItem, stored: StoredContentItem, nowMs: number, hasHandler: boolean): boolean {
+  if (!hasHandler || item.kind !== 'clip' || stored.kind !== 'clip') return false;
+  const firstSeen = Date.parse(stored.firstSeenAt);
+  return Number.isFinite(firstSeen) && nowMs - firstSeen < CLIP_RECHECK_WINDOW_MS;
+}
+
+interface StoredContent {
+  /** Newly inserted items to announce. */
+  fresh: FreshContent[];
+  /** Already stored young clips seen again (#6 re-evaluation). */
+  updates: FreshContent[];
+}
+
 interface FreshContent {
   item: ContentItem;
   stored: StoredContentItem;
@@ -836,16 +857,17 @@ export class Monitor implements MonitorApi {
     if (!fetched) return;
     this.noteContentOutcome(platform, null);
 
-    let fresh: FreshContent[];
+    let stored: StoredContent;
     try {
-      fresh = this.storeContent(fetched.channel, fetched.items, fetched.plan);
+      stored = this.storeContent(fetched.channel, fetched.items, fetched.plan);
     } catch (err) {
       log.error({ err, channelId, platform }, 'failed to store content items');
       return;
     }
-    if (fresh.length === 0) return;
+    if (stored.fresh.length === 0 && stored.updates.length === 0) return;
     const channel = this.repos.channels.get(channelId) ?? fetched.channel;
-    for (const { item, stored } of fresh) await this.deliverContent(channel, item, stored);
+    for (const { item, stored: row } of stored.fresh) await this.deliverContent(channel, item, row);
+    for (const { item, stored: row } of stored.updates) await this.deliverContentUpdate(channel, item, row);
   }
 
   /**
@@ -853,7 +875,7 @@ export class Monitor implements MonitorApi {
    * the channel was never seeded (first check), their kind has no baseline yet (kind just enabled), they
    * are older than every interested guild accepts, or a channel seeded with nothing suddenly returns a burst.
    */
-  private storeContent(channel: Channel, items: ContentItem[], plan: ContentPlan): FreshContent[] {
+  private storeContent(channel: Channel, items: ContentItem[], plan: ContentPlan): StoredContent {
     const now = Date.now();
     const ordered = orderOldestFirst(sanitizeItems(items, plan.kinds)).map((item) => ({ ...item, platform: channel.platform, platformId: channel.platformId }));
     const key = seedKey(channel.id);
@@ -864,16 +886,21 @@ export class Monitor implements MonitorApi {
         this.repos.channels.markContentChecked(channel.id, true);
         this.repos.kv.set(key, { kinds: plan.kinds, empty: ordered.length === 0 } satisfies SeedRecord);
         log.info({ channelId: channel.id, platform: channel.platform, handle: channel.handle, items: ordered.length }, 'content baseline stored (no notifications)');
-        return [];
+        return { fresh: [], updates: [] };
       }
 
       const seed = this.readSeed(key);
       const baselined = new Set(seed?.kinds ?? plan.kinds);
       let fresh: FreshContent[] = [];
       let silent = 0;
+      const updates: FreshContent[] = [];
       for (const item of ordered) {
         const { item: stored, inserted } = this.repos.content.insert(channel.id, item, false);
-        if (!inserted) continue;
+        if (!inserted) {
+          // #6 — young clips seen again (fresh view count / featured flag) may now pass a guild's clip filters.
+          if (wantsContentUpdate(item, stored, now, this.content.onContentUpdate !== undefined)) updates.push({ item, stored });
+          continue;
+        }
         if (!baselined.has(item.kind) || isTooOld(item, plan.maxAgeMs, now)) silent++;
         else fresh.push({ item, stored });
       }
@@ -886,7 +913,7 @@ export class Monitor implements MonitorApi {
       this.repos.channels.markContentChecked(channel.id, true);
       this.repos.kv.set(key, { kinds: plan.kinds, empty: wasEmpty && ordered.length === 0 } satisfies SeedRecord);
       if (silent > 0) log.debug({ channelId: channel.id, platform: channel.platform, silent }, 'new items stored without notification');
-      return fresh;
+      return { fresh, updates };
     });
   }
 
@@ -911,6 +938,25 @@ export class Monitor implements MonitorApi {
     } catch {
       log.warn({ channelId: channel.id, contentId: item.contentId }, 'content handler is slow; continuing without waiting');
       this.track('slow content handler', () => run);
+    }
+  }
+
+  /** #6 — hands a re-seen young clip to the content handler (bounded wait, never throws). */
+  private async deliverContentUpdate(channel: Channel, item: ContentItem, stored: StoredContentItem): Promise<void> {
+    const handler = this.content.onContentUpdate?.bind(this.content);
+    if (!handler) return;
+    const run = (async () => {
+      try {
+        await handler(channel, item, stored);
+      } catch (err) {
+        log.error({ err, channelId: channel.id, contentId: item.contentId }, 'content update handler failed');
+      }
+    })();
+    try {
+      await withTimeout(run, this.tuning.handlerTimeoutMs, 'content update handler');
+    } catch {
+      log.warn({ channelId: channel.id, contentId: item.contentId }, 'content update handler is slow; continuing without waiting');
+      this.track('slow content update handler', () => run);
     }
   }
 

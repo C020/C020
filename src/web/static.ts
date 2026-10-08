@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { buildMissingPage } from './pages.js';
+import { localizeMessage, requestLanguage } from './i18n.js';
 
 const API_PREFIXES = ['/api', '/auth', '/webhooks'];
 const FILE_EXTENSION_RE = /\.[a-z0-9]{1,8}$/i;
@@ -42,7 +43,7 @@ export function spaFallback(publicDir: string) {
     const path = request.url.split('?', 1)[0] ?? '/';
     const isPageRequest = (request.method === 'GET' || request.method === 'HEAD') && !isBackendPath(path);
     if (!isPageRequest) {
-      return reply.code(404).header('cache-control', 'no-store').send({ error: 'not_found', message: 'المسار غير موجود' });
+      return reply.code(404).header('cache-control', 'no-store').send({ error: 'not_found', message: localizeMessage('المسار غير موجود', requestLanguage(request)) });
     }
     if (FILE_EXTENSION_RE.test(path) && !path.endsWith('.html')) {
       // A missing asset must not be answered with HTML (browsers would report a confusing MIME error).

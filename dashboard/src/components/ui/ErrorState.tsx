@@ -2,6 +2,7 @@ import { RefreshCw, WifiOff, TriangleAlert } from 'lucide-react';
 import { errorMessage, isApiError } from '../../api/client';
 import { cn } from '../../lib/cn';
 import { Button } from './Button';
+import { t } from '../../i18n';
 
 export interface ErrorStateProps {
   error: unknown;
@@ -21,12 +22,12 @@ export function ErrorState({ error, onRetry, retrying, title, className, compact
         <Icon className="size-5" />
       </div>
       <div className="space-y-1">
-        <p className="font-medium text-zinc-200">{title ?? (offline ? 'ما قدرنا نوصل للسيرفر' : 'ما قدرنا نجيب البيانات')}</p>
+        <p className="font-medium text-zinc-200">{title ?? (offline ? t('errorState.offline') : t('errorState.failed'))}</p>
         <p className="mx-auto max-w-md text-[13px] leading-relaxed text-zinc-400">{errorMessage(error)}</p>
       </div>
       {onRetry && (
         <Button size="sm" variant="secondary" onClick={onRetry} loading={retrying} icon={<RefreshCw className="size-3.5" />}>
-          حاول مرة ثانية
+          {t('common.retry')}
         </Button>
       )}
     </div>

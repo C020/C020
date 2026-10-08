@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { MessagePreview } from '../../shared/api.js';
-import { HttpError } from '../httpErrors.js';
+import { HttpError, notFound } from '../httpErrors.js';
 import { parseInput, previewSchema, testSchema } from '../schemas.js';
 import { discordAction, guildIdOf, requireAuth, type ApiDeps } from './deps.js';
 
@@ -41,7 +41,13 @@ export function registerToolRoutes(g: FastifyInstance, deps: ApiDeps): void {
 
   g.post('/preview', async (request): Promise<MessagePreview> => {
     const guildId = guildIdOf(request);
-    const { type, template } = parseInput(previewSchema, request.body);
-    return discordAction(request, 'Rendering preview', 'ما قدرنا نجهّز المعاينة الحين، جرّب بعد شوي', () => ctx.discord.preview(guildId, type, template));
+    const { type, template, streamerId } = parseInput(previewSchema, request.body);
+    if (streamerId !== undefined) {
+      const streamer = ctx.repos.streamers.get(streamerId);
+      if (!streamer || streamer.guildId !== guildId) throw notFound('الستريمر غير موجود');
+    }
+    return discordAction(request, 'Rendering preview', 'ما قدرنا نجهّز المعاينة الحين، جرّب بعد شوي', () =>
+      streamerId !== undefined ? ctx.discord.preview(guildId, type, template, streamerId) : ctx.discord.preview(guildId, type, template),
+    );
   });
 }

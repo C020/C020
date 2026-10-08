@@ -3,6 +3,7 @@ import {
   Activity,
   Bell,
   BellOff,
+  ClipboardList,
   History,
   LayoutDashboard,
   LogOut,
@@ -12,13 +13,16 @@ import {
   Radio,
   ServerCog,
   Settings,
+  Upload,
   Users,
   X,
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { api } from '../../api/endpoints';
-import { keys, useLogout } from '../../api/queries';
+import { t, type MessageKey } from '../../i18n';
+import { keys, useLogout, useSettings } from '../../api/queries';
+import { pendingBadge } from '../../lib/applications';
 import type { GuildSummary } from '../../api/types';
 import type { RealtimeStatus } from '../../hooks/useGuildEvents';
 import { useRealtimeToasts } from '../../hooks/usePreferences';
@@ -29,6 +33,7 @@ import { StatusDot } from '../ui/Badge';
 import { buttonClasses } from '../ui/Button';
 import { Menu, MenuItem, MenuSeparator } from '../ui/Menu';
 import { GuildSwitcher } from './GuildSwitcher';
+import { LanguageToggle } from './LanguageToggle';
 
 interface NavItem {
   to: string;
@@ -55,17 +60,43 @@ function LiveCountBadge({ guildId }: { guildId: string }) {
   );
 }
 
-function navItems(guild: GuildSummary | undefined): NavItem[] {
-  if (!guild) return [{ to: '/system', label: 'حالة النظام', icon: ServerCog }];
+function PendingApplicationsBadge({ guildId }: { guildId: string }) {
+  const { data: pending } = useQuery({
+    queryKey: keys.overview(guildId),
+    queryFn: ({ signal }) => api.overview(guildId, signal),
+    enabled: false,
+    select: (o) => o.counts.pendingApplications,
+  });
+  const label = pendingBadge(pending);
+  if (!label) return null;
+  return (
+    <span
+      className="ms-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500/15 px-1.5 text-[11px] font-semibold text-amber-300 ring-1 ring-inset ring-amber-500/30"
+      aria-label={t('nav.pendingApplications', { count: pending ?? 0 })}
+    >
+      {label}
+    </span>
+  );
+}
+
+interface NavFlags {
+  applications: boolean;
+  manualPosts: boolean;
+}
+
+function navItems(guild: GuildSummary | undefined, flags: NavFlags): NavItem[] {
+  if (!guild) return [{ to: '/system', label: t('nav.systemStatus'), icon: ServerCog }];
   const base = `/g/${guild.id}`;
   return [
-    { to: base, label: 'نظرة عامة', icon: LayoutDashboard, end: true, badge: <LiveCountBadge guildId={guild.id} /> },
-    { to: `${base}/streamers`, label: 'الستريمرز', icon: Users },
-    { to: `${base}/settings`, label: 'الإعدادات', icon: Settings },
-    { to: `${base}/templates`, label: 'الرسائل', icon: MessageSquareText },
-    { to: `${base}/history`, label: 'السجل', icon: History },
-    { to: `${base}/activity`, label: 'النشاط', icon: Activity },
-    { to: `${base}/system`, label: 'الحالة', icon: ServerCog },
+    { to: base, label: t('nav.overview'), icon: LayoutDashboard, end: true, badge: <LiveCountBadge guildId={guild.id} /> },
+    { to: `${base}/streamers`, label: t('nav.streamers'), icon: Users },
+    ...(flags.applications ? [{ to: `${base}/applications`, label: t('nav.applications'), icon: ClipboardList, badge: <PendingApplicationsBadge guildId={guild.id} /> }] : []),
+    ...(flags.manualPosts ? [{ to: `${base}/manual-post`, label: t('nav.manualPost'), icon: Upload }] : []),
+    { to: `${base}/settings`, label: t('nav.settings'), icon: Settings },
+    { to: `${base}/templates`, label: t('nav.templates'), icon: MessageSquareText },
+    { to: `${base}/history`, label: t('nav.history'), icon: History },
+    { to: `${base}/activity`, label: t('nav.activity'), icon: Activity },
+    { to: `${base}/system`, label: t('nav.system'), icon: ServerCog },
   ];
 }
 
@@ -77,8 +108,8 @@ function BrandMark() {
         <span className="absolute -end-0.5 -top-0.5 size-2.5 rounded-full bg-rose-500 ring-2 ring-zinc-950" />
       </div>
       <div className="leading-tight">
-        <p className="text-[15px] font-semibold text-white">بوت البثوث</p>
-        <p className="text-[11px] text-zinc-500">لوحة التحكم</p>
+        <p className="text-[15px] font-semibold text-white">{t('app.name')}</p>
+        <p className="text-[11px] text-zinc-500">{t('app.tagline')}</p>
       </div>
     </div>
   );
@@ -95,25 +126,42 @@ function BotStatusCard() {
           <StatusDot tone={bot?.ready ? 'ok' : 'error'} className="absolute -bottom-0.5 -end-0.5 size-2.5 ring-2 ring-zinc-900" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium text-zinc-200">{bot?.username ?? 'البوت'}</p>
-          <p className={cn('text-[11px]', bot?.ready ? 'text-emerald-400/90' : 'text-rose-400')}>{bot?.ready ? 'متصل بديسكورد' : 'غير متصل'}</p>
+          <p className="truncate text-[13px] font-medium text-zinc-200">{bot?.username ?? t('shell.bot')}</p>
+          <p className={cn('text-[11px]', bot?.ready ? 'text-emerald-400/90' : 'text-rose-400')}>{bot?.ready ? t('shell.connected') : t('shell.disconnected')}</p>
         </div>
       </div>
       <a href={me.inviteUrl} target="_blank" rel="noopener noreferrer" className={buttonClasses('ghost', 'xs', 'mt-2 w-full')}>
         <Plus className="size-3.5" />
-        دعوة البوت لسيرفر
+        {t('shell.invite')}
       </a>
     </div>
   );
 }
 
+/** Optional pages appear when their feature is on (applications also while some are still pending). */
+function useNavFlags(guildId: string | undefined): NavFlags {
+  const settings = useSettings(guildId ?? '');
+  const { data: pending } = useQuery({
+    queryKey: keys.overview(guildId ?? ''),
+    queryFn: ({ signal }) => api.overview(guildId ?? '', signal),
+    enabled: false,
+    select: (o) => o.counts.pendingApplications,
+  });
+  const features = guildId ? settings.data?.features : undefined;
+  return {
+    applications: !!features?.applications?.enabled || (pending ?? 0) > 0,
+    manualPosts: !!features?.manualPosts?.enabled,
+  };
+}
+
 function SidebarContent({ guild, onNavigate }: { guild?: GuildSummary; onNavigate?: () => void }) {
+  const flags = useNavFlags(guild?.id);
   return (
     <div className="flex h-full flex-col gap-5 p-4">
       <BrandMark />
       {guild && <GuildSwitcher current={guild} />}
-      <nav className="flex flex-1 flex-col gap-0.5" aria-label="التنقل">
-        {navItems(guild).map((item) => (
+      <nav className="flex flex-1 flex-col gap-0.5" aria-label={t('shell.navAria')}>
+        {navItems(guild, flags).map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -142,18 +190,19 @@ function SidebarContent({ guild, onNavigate }: { guild?: GuildSummary; onNavigat
   );
 }
 
-const REALTIME_LABELS: Record<RealtimeStatus, { label: string; tone: 'ok' | 'warn' | 'off' }> = {
-  open: { label: 'مباشر', tone: 'ok' },
-  connecting: { label: 'يتصل…', tone: 'warn' },
-  reconnecting: { label: 'يعيد الاتصال…', tone: 'warn' },
-  paused: { label: 'متوقف مؤقتاً', tone: 'off' },
+const REALTIME_LABELS: Record<RealtimeStatus, { label: MessageKey; tone: 'ok' | 'warn' | 'off' }> = {
+  open: { label: 'shell.rt.open', tone: 'ok' },
+  connecting: { label: 'shell.rt.connecting', tone: 'warn' },
+  reconnecting: { label: 'shell.rt.reconnecting', tone: 'warn' },
+  paused: { label: 'shell.rt.paused', tone: 'off' },
 };
 
 function RealtimeIndicator({ status }: { status: RealtimeStatus }) {
-  const { label, tone } = REALTIME_LABELS[status];
+  const { label: labelKey, tone } = REALTIME_LABELS[status];
+  const label = t(labelKey);
   return (
     <span
-      title={status === 'open' ? 'التحديثات توصل لحظياً' : 'التحديثات اللحظية مو متصلة، البيانات تتحدث دورياً'}
+      title={status === 'open' ? t('shell.rt.openTitle') : t('shell.rt.offTitle')}
       className="inline-flex h-8 items-center gap-2 rounded-full bg-white/[0.04] px-3 text-xs text-zinc-400 ring-1 ring-inset ring-white/[0.06]"
     >
       <span className="relative inline-flex">
@@ -171,7 +220,7 @@ function UserMenu() {
   return (
     <Menu
       trigger={({ open, toggle }) => (
-        <button type="button" onClick={toggle} aria-expanded={open} aria-label="حسابي" className="flex items-center gap-2 rounded-full p-0.5 pe-0.5 ring-1 ring-inset ring-white/[0.08] transition-colors hover:bg-white/[0.06] sm:pe-3">
+        <button type="button" onClick={toggle} aria-expanded={open} aria-label={t('shell.account')} className="flex items-center gap-2 rounded-full p-0.5 pe-0.5 ring-1 ring-inset ring-white/[0.08] transition-colors hover:bg-white/[0.06] sm:pe-3">
           <Avatar src={me.user.avatarUrl} name={me.user.username} size={30} />
           <span className="hidden max-w-32 truncate text-[13px] font-medium text-zinc-200 sm:inline">{me.user.username}</span>
         </button>
@@ -183,14 +232,14 @@ function UserMenu() {
             <Avatar src={me.user.avatarUrl} name={me.user.username} size={36} />
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-zinc-100">{me.user.username}</p>
-              <p dir="ltr" className="truncate text-end font-mono text-[11px] text-zinc-500">
+              <p dir="ltr" className="truncate text-right font-mono ltr:text-left text-[11px] text-zinc-500">
                 {me.user.id}
               </p>
             </div>
           </div>
           <MenuSeparator />
           <MenuItem icon={<Plus className="size-4 text-zinc-400" />} href={me.inviteUrl} external onClick={close}>
-            دعوة البوت لسيرفر
+            {t('shell.invite')}
           </MenuItem>
           <MenuItem
             danger
@@ -200,7 +249,7 @@ function UserMenu() {
               logout.mutate();
             }}
           >
-            تسجيل الخروج
+            {t('shell.logout')}
           </MenuItem>
         </>
       )}
@@ -239,8 +288,8 @@ export function AppShell({ guild, realtime, children }: AppShellProps) {
       {drawerOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <div className="absolute inset-0 animate-fade-in bg-black/60 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} aria-hidden />
-          <aside className="absolute inset-y-0 start-0 w-[280px] max-w-[85vw] animate-slide-in-start border-e border-white/[0.08] bg-zinc-950/95 backdrop-blur-xl">
-            <button type="button" onClick={() => setDrawerOpen(false)} aria-label="إغلاق القائمة" className="absolute end-3 top-4 grid size-8 place-items-center rounded-lg text-zinc-400 hover:bg-white/[0.06]">
+          <aside className="absolute inset-y-0 start-0 w-[280px] max-w-[85vw] animate-slide-in-start border-e ltr:animate-slide-in-end border-white/[0.08] bg-zinc-950/95 backdrop-blur-xl">
+            <button type="button" onClick={() => setDrawerOpen(false)} aria-label={t('shell.closeMenu')} className="absolute end-3 top-4 grid size-8 place-items-center rounded-lg text-zinc-400 hover:bg-white/[0.06]">
               <X className="size-4" />
             </button>
             <SidebarContent guild={guild} onNavigate={() => setDrawerOpen(false)} />
@@ -251,7 +300,7 @@ export function AppShell({ guild, realtime, children }: AppShellProps) {
       <div className="lg:ps-[264px]">
         <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-zinc-950/60 backdrop-blur-xl">
           <div className="mx-auto flex h-16 max-w-7xl items-center gap-3 px-4 sm:px-6 lg:px-8">
-            <button type="button" onClick={() => setDrawerOpen(true)} aria-label="فتح القائمة" className="grid size-9 place-items-center rounded-lg text-zinc-300 hover:bg-white/[0.06] lg:hidden">
+            <button type="button" onClick={() => setDrawerOpen(true)} aria-label={t('shell.openMenu')} className="grid size-9 place-items-center rounded-lg text-zinc-300 hover:bg-white/[0.06] lg:hidden">
               <MenuIcon className="size-5" />
             </button>
             {guild && (
@@ -271,12 +320,14 @@ export function AppShell({ guild, realtime, children }: AppShellProps) {
                   type="button"
                   onClick={() => setToasts(!toasts)}
                   aria-pressed={toasts}
-                  title={toasts ? 'إيقاف تنبيهات البث والمقاطع في اللوحة' : 'تشغيل تنبيهات البث والمقاطع في اللوحة'}
+                  title={toasts ? t('shell.toastsOff') : t('shell.toastsOn')}
+                  aria-label={toasts ? t('shell.toastsOff') : t('shell.toastsOn')}
                   className="grid size-9 place-items-center rounded-full text-zinc-400 ring-1 ring-inset ring-white/[0.08] transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
                 >
                   {toasts ? <Bell className="size-4" /> : <BellOff className="size-4" />}
                 </button>
               )}
+              <LanguageToggle />
               <UserMenu />
             </div>
           </div>

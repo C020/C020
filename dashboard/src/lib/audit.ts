@@ -1,24 +1,25 @@
 import type { AuditEntry, AuditLevel } from '../api/types';
+import { t, translatedRecord } from '../i18n/core';
 
 export type AuditCategory = 'live' | 'content' | 'streamer' | 'settings' | 'roles' | 'discord' | 'provider' | 'tools' | 'system';
 
-export const AUDIT_CATEGORY_LABELS: Record<AuditCategory, string> = {
-  live: 'بث',
-  content: 'مقاطع',
-  streamer: 'ستريمرز',
-  settings: 'إعدادات',
-  roles: 'رتب',
-  discord: 'ديسكورد',
-  provider: 'منصات',
-  tools: 'أدوات',
-  system: 'النظام',
-};
+export const AUDIT_CATEGORY_LABELS: Readonly<Record<AuditCategory, string>> = translatedRecord({
+  live: 'audit.cat.live',
+  content: 'audit.cat.content',
+  streamer: 'audit.cat.streamer',
+  settings: 'audit.cat.settings',
+  roles: 'audit.cat.roles',
+  discord: 'audit.cat.discord',
+  provider: 'audit.cat.provider',
+  tools: 'audit.cat.tools',
+  system: 'audit.cat.system',
+});
 
-export const AUDIT_LEVEL_LABELS: Record<AuditLevel, string> = {
-  info: 'معلومة',
-  warn: 'تنبيه',
-  error: 'خطأ',
-};
+export const AUDIT_LEVEL_LABELS: Readonly<Record<AuditLevel, string>> = translatedRecord({
+  info: 'audit.level.info',
+  warn: 'audit.level.warn',
+  error: 'audit.level.error',
+});
 
 /** Groups audit actions ("live.start", "account.add", "role.add", "discord.role.deleted"...) for icons and filters. */
 export function auditCategory(action: string): AuditCategory {
@@ -56,10 +57,10 @@ export function actorUserId(actor: string): string | null {
 
 export function actorLabel(actor: string, currentUserId?: string | null): string {
   const userId = actorUserId(actor);
-  if (userId) return userId === currentUserId ? 'أنت' : `مشرف ${userId.slice(-4)}…`;
-  if (actor === 'system' || actor === '') return 'النظام';
-  if (actor === 'monitor') return 'المراقب';
-  if (actor === 'bot') return 'البوت';
+  if (userId) return userId === currentUserId ? t('audit.actor.you') : t('audit.actor.admin', { id: userId.slice(-4) });
+  if (actor === 'system' || actor === '') return t('audit.actor.system');
+  if (actor === 'monitor') return t('audit.actor.monitor');
+  if (actor === 'bot') return t('audit.actor.bot');
   return actor;
 }
 

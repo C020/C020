@@ -35,9 +35,13 @@ import { useModHotkey } from '../hooks/useHotkey';
 import { useLatest } from '../hooks/useLatest';
 import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 import { cn } from '../lib/cn';
-import { CONTENT_KIND_HINTS, CONTENT_KIND_LABELS_AR, CONTENT_KINDS, PLATFORM_META, PLATFORMS } from '../lib/platforms';
+import { CONTENT_KIND_HINTS, CONTENT_KIND_LABELS, CONTENT_KINDS, PLATFORM_META, PLATFORMS } from '../lib/platforms';
 import { diffSettings, draftFromSettings, hasChanges, OPTION_LIMITS, validateDraft, type SettingsDraft } from '../lib/settings';
 import { toast } from '../lib/toast';
+import { t } from '../i18n';
+import { countFeatureChanges, featuresDraft } from '../lib/features';
+import { FeatureSections } from './settings/FeatureSections';
+import type { GuildFeatures } from '../api/types';
 
 export default function SettingsPage() {
   const { guildId } = useGuild();
@@ -45,7 +49,7 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="الإعدادات" icon={<Settings className="size-5" />} description="الرتب، الرومات، المنشن، المنصات وخيارات الإشعارات" />
+      <PageHeader title={t('nav.settings')} icon={<Settings className="size-5" />} description={t('settings.desc')} />
       {settings.data ? (
         <SettingsForm saved={settings.data} />
       ) : settings.isError ? (
@@ -76,10 +80,12 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
   const [staleBase, setStaleBase] = useState(false);
 
   const update = useMemo(() => diffSettings(base, draft), [base, draft]);
+  const savedFeatures = useMemo(() => featuresDraft(base.features), [base]);
   const dirty = hasChanges(update);
   const errors = useMemo(() => validateDraft(draft, guildId), [draft, guildId]);
   const errorCount = Object.keys(errors).length;
-  const changeCount = Object.keys(update).length + (update.options ? Object.keys(update.options).length - 1 : 0);
+  const changeCount =
+    Object.keys(update).length + (update.options ? Object.keys(update.options).length - 1 : 0) + (update.features ? countFeatureChanges(update.features) - 1 : 0);
 
   // Settings changed elsewhere (another admin, slash command): adopt them unless the user is editing.
   const latest = useLatest({ base, draft, dirty });
@@ -113,6 +119,11 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
     if (serverError?.field === `options.${key}`) setServerError(null);
   };
 
+  const setFeatures = (updater: (f: GuildFeatures) => GuildFeatures): void => {
+    setDraft((d) => ({ ...d, features: updater(d.features) }));
+    if (serverError?.field?.startsWith('features')) setServerError(null);
+  };
+
   const fieldError = (field: string): string | null => errors[field] ?? (serverError?.field === field ? serverError.message : null);
 
   const reset = (): void => {
@@ -125,7 +136,7 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
   const save = (): void => {
     if (!dirty || updateSettings.isPending) return;
     if (errorCount > 0) {
-      toast.error('فيه حقول تحتاج تصحيح قبل الحفظ');
+      toast.error(t('settings.fixFields'));
       return;
     }
     setServerError(null);
@@ -134,10 +145,10 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
         setBase(next);
         setDraft(draftFromSettings(next));
         setStaleBase(false);
-        toast.success('تم حفظ الإعدادات');
+        toast.success(t('settings.saved'));
       },
       onError: (error) => {
-        const message = isApiError(error) ? error.message : 'ما قدرنا نحفظ الإعدادات';
+        const message = isApiError(error) ? error.message : t('settings.saveFailed');
         setServerError({ field: isApiError(error) ? error.field : undefined, message });
         toast.error(message);
         const field = isApiError(error) ? error.field : undefined;
@@ -151,8 +162,8 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
   const runSync = (): void => {
     syncRoles.mutate(undefined, {
       onSuccess: (result) =>
-        toast.success('تمت مزامنة الرتب', {
-          description: result.added + result.removed === 0 ? 'كل الرتب مضبوطة، ما احتجنا نغيّر شي' : `انعطت ${result.added} رتبة وانشالت ${result.removed}`,
+        toast.success(t('settings.synced'), {
+          description: result.added + result.removed === 0 ? t('settings.syncNoop') : t('settings.syncResult', { added: result.added, removed: result.removed }),
         }),
     });
   };
@@ -167,9 +178,9 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
       {staleBase && (
         <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-sky-500/[0.07] p-4 ring-1 ring-inset ring-sky-500/20">
           <RefreshCw className="size-4 text-sky-300" />
-          <p className="flex-1 text-[13px] text-sky-100/90">الإعدادات تغيّرت من مكان ثاني وأنت تعدّل. تقدر تكمل وتحفظ تعديلاتك، أو تحمّل النسخة الجديدة.</p>
+          <p className="flex-1 text-[13px] text-sky-100/90">{t('settings.changedElsewhere')}</p>
           <Button size="sm" variant="secondary" onClick={reset}>
-            تحميل النسخة الجديدة
+            {t('settings.loadNew')}
           </Button>
         </div>
       )}
@@ -177,9 +188,9 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
       {lookupsUnavailable && (
         <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-amber-500/[0.07] p-4 ring-1 ring-inset ring-amber-500/20">
           <TriangleAlert className="size-4 text-amber-300" />
-          <p className="flex-1 text-[13px] text-amber-100/90">ما قدرنا نجيب الرتب والرومات من ديسكورد الحين. تقدر تلصق الآيدي مباشرة، أو تعيد المحاولة.</p>
+          <p className="flex-1 text-[13px] text-amber-100/90">{t('settings.lookupsFailed')}</p>
           <Button size="sm" variant="secondary" onClick={() => void lookups.refetch()} loading={lookups.isFetching}>
-            إعادة المحاولة
+            {t('common.retryShort')}
           </Button>
         </div>
       )}
@@ -187,16 +198,16 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
       <Section
         id="roles"
         icon={<Shield className="size-[18px]" />}
-        title="الرتب"
-        description="تقدر تختار الرتبة من القائمة أو تلصق الآيدي حقها مباشرة. رتبة البوت لازم تكون فوق الرتبتين."
+        title={t('settings.roles')}
+        description={t('settings.rolesDesc')}
         actions={
-          <Button size="sm" variant="secondary" onClick={runSync} loading={syncRoles.isPending} disabled={dirty} title={dirty ? 'احفظ التغييرات أول' : undefined} icon={<RefreshCw className="size-3.5" />}>
-            مزامنة الرتب
+          <Button size="sm" variant="secondary" onClick={runSync} loading={syncRoles.isPending} disabled={dirty} title={dirty ? t('settings.saveFirst') : undefined} icon={<RefreshCw className="size-3.5" />}>
+            {t('settings.syncRoles')}
           </Button>
         }
       >
         <div className="grid gap-5 md:grid-cols-2">
-          <Field label="رتبة الستريمر (Streamer)" htmlFor="field-streamerRoleId" hint="تنعطى تلقائياً لكل ستريمر مسجّل." error={fieldError('streamerRoleId')}>
+          <Field label={t('settings.streamerRole')} htmlFor="field-streamerRoleId" hint={t('settings.streamerRoleHint')} error={fieldError('streamerRoleId')}>
             <RolePicker
               id="field-streamerRoleId"
               guildId={guildId}
@@ -208,7 +219,7 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
               {...pickerCommon}
             />
           </Field>
-          <Field label="رتبة يبث الحين (Streaming Now)" htmlFor="field-liveRoleId" hint="تنعطى وقت البث، وتنشال لما يخلص في كل المنصات." error={fieldError('liveRoleId')}>
+          <Field label={t('settings.liveRole')} htmlFor="field-liveRoleId" hint={t('settings.liveRoleHint')} error={fieldError('liveRoleId')}>
             <RolePicker
               id="field-liveRoleId"
               guildId={guildId}
@@ -223,26 +234,26 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
         </div>
         <div className="mt-4 divide-y divide-white/[0.05] border-t border-white/[0.05]">
           <SwitchRow
-            title="إعطاء رتبة الستريمر تلقائياً"
-            description="أول ما تضيف ستريمر ياخذ الرتبة، والبوت يتأكد منها دورياً."
+            title={t('settings.autoRole')}
+            description={t('settings.autoRoleDesc')}
             checked={draft.options.autoStreamerRole}
             onChange={(v) => setOption('autoStreamerRole', v)}
           />
           <SwitchRow
-            title="سحب رتبة الستريمر عند الحذف"
-            description="لما تحذف ستريمر من اللوحة تنشال منه رتبة Streamer."
+            title={t('settings.removeRole')}
+            description={t('settings.removeRoleDesc')}
             checked={draft.options.removeStreamerRoleOnDelete}
             onChange={(v) => setOption('removeStreamerRoleOnDelete', v)}
           />
         </div>
       </Section>
 
-      <Section id="channels" icon={<Hash className="size-[18px]" />} title="الرومات" description="وين تنرسل الإشعارات. البوت يحتاج صلاحية View Channel و Send Messages و Embed Links، و Attach Files لصور تيك توك.">
+      <Section id="channels" icon={<Hash className="size-[18px]" />} title={t('settings.channels')} description={t('settings.channelsDesc')}>
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          <Field label="روم إشعارات البث" htmlFor="field-liveChannelId" hint="إشعار البث المباشر والملخص بعده." error={fieldError('liveChannelId')}>
+          <Field label={t('settings.liveChannel')} htmlFor="field-liveChannelId" hint={t('settings.liveChannelHint')} error={fieldError('liveChannelId')}>
             <ChannelPicker id="field-liveChannelId" channels={channels} value={draft.liveChannelId} onChange={(v) => set('liveChannelId', v)} invalid={!!fieldError('liveChannelId')} {...pickerCommon} />
           </Field>
-          <Field label="روم إشعارات المقاطع" htmlFor="field-contentChannelId" hint="فيديوهات، شورتس، كليبات… (تقدر تخليه نفس روم البث)." error={fieldError('contentChannelId')}>
+          <Field label={t('settings.contentChannel')} htmlFor="field-contentChannelId" hint={t('settings.contentChannelHint')} error={fieldError('contentChannelId')}>
             <ChannelPicker
               id="field-contentChannelId"
               channels={channels}
@@ -252,32 +263,32 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
               {...pickerCommon}
             />
           </Field>
-          <Field label="روم السجل (اختياري)" htmlFor="field-logChannelId" hint="الأخطاء والتنبيهات المهمة توصل هنا." error={fieldError('logChannelId')}>
+          <Field label={t('settings.logChannel')} htmlFor="field-logChannelId" hint={t('settings.logChannelHint')} error={fieldError('logChannelId')}>
             <ChannelPicker id="field-logChannelId" channels={channels} value={draft.logChannelId} onChange={(v) => set('logChannelId', v)} invalid={!!fieldError('logChannelId')} {...pickerCommon} />
           </Field>
         </div>
       </Section>
 
-      <Section id="ping" icon={<AtSign className="size-[18px]" />} title="المنشن مع الإشعار" description="الافتراضي بدون منشن. المنشن ينضاف لإشعار البث والمقاطع، وما ينضاف للملخص ولا للتحديثات.">
+      <Section id="ping" icon={<AtSign className="size-[18px]" />} title={t('settings.ping')} description={t('settings.pingDesc')}>
         <Segmented<PingMode>
           value={draft.pingMode}
           onChange={(v) => set('pingMode', v)}
-          ariaLabel="نوع المنشن"
+          ariaLabel={t('settings.pingMode')}
           options={[
-            { value: 'none', label: 'بدون منشن', icon: <BellOff className="size-3.5" /> },
+            { value: 'none', label: t('settings.pingNone'), icon: <BellOff className="size-3.5" /> },
             { value: 'everyone', label: '@everyone', icon: <Bell className="size-3.5" /> },
             { value: 'here', label: '@here', icon: <Bell className="size-3.5" /> },
-            { value: 'role', label: 'رتبة معيّنة', icon: <Users className="size-3.5" /> },
+            { value: 'role', label: t('settings.pingRoleOpt'), icon: <Users className="size-3.5" /> },
           ]}
         />
         {(draft.pingMode === 'everyone' || draft.pingMode === 'here') && (
           <p className="mt-3 flex items-center gap-2 text-[13px] text-amber-300/90">
             <TriangleAlert className="size-4 shrink-0" />
-            بينمنشن {draft.pingMode === 'everyone' ? 'كل أعضاء السيرفر' : 'كل المتصلين'} مع كل بث ومقطع. تأكد إن البوت عنده صلاحية Mention Everyone.
+            {draft.pingMode === 'everyone' ? t('settings.pingEveryoneWarn') : t('settings.pingHereWarn')}
           </p>
         )}
         {draft.pingMode === 'role' && (
-          <Field className="mt-4 max-w-md" label="الرتبة اللي تنمنشن" htmlFor="field-pingRoleId" error={fieldError('pingRoleId')} hint="لازم تكون الرتبة قابلة للمنشن أو البوت عنده Mention Everyone.">
+          <Field className="mt-4 max-w-md" label={t('settings.pingRole')} htmlFor="field-pingRoleId" error={fieldError('pingRoleId')} hint={t('settings.pingRoleHint')}>
             <RolePicker
               id="field-pingRoleId"
               guildId={guildId}
@@ -292,7 +303,7 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
         )}
       </Section>
 
-      <Section id="platforms" icon={<Layers className="size-[18px]" />} title="المنصات" description="المنصات المقفلة ما تنراقب في هذا السيرفر (حتى لو فيه حسابات مربوطة).">
+      <Section id="platforms" icon={<Layers className="size-[18px]" />} title={t('settings.platforms')} description={t('settings.platformsDesc')}>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {PLATFORMS.map((platform) => (
             <PlatformToggle
@@ -305,7 +316,7 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
         </div>
       </Section>
 
-      <Section id="content" icon={<Clapperboard className="size-[18px]" />} title="إشعارات المقاطع" description="أنواع المحتوى اللي ينعلن عنها. تقدر تخصصها لكل حساب من صفحة الستريمرز.">
+      <Section id="content" icon={<Clapperboard className="size-[18px]" />} title={t('settings.content')} description={t('settings.contentDesc')}>
         <div className="flex flex-wrap gap-2">
           {CONTENT_KINDS.map((kind) => (
             <ToggleChip
@@ -314,74 +325,91 @@ function SettingsForm({ saved }: { saved: SettingsDto }) {
               title={CONTENT_KIND_HINTS[kind]}
               onToggle={() => set('contentKinds', toggleKind(draft.contentKinds, kind))}
             >
-              {CONTENT_KIND_LABELS_AR[kind]}
+              {CONTENT_KIND_LABELS[kind]}
             </ToggleChip>
           ))}
         </div>
-        {draft.contentKinds.length === 0 && <p className="mt-3 text-[13px] text-amber-300/90">كل الأنواع مقفلة، يعني ما راح تنرسل أي إشعارات مقاطع.</p>}
+        {draft.contentKinds.length === 0 && <p className="mt-3 text-[13px] text-amber-300/90">{t('settings.allKindsOff')}</p>}
         <div className="mt-5 grid gap-5 border-t border-white/[0.05] pt-5 md:grid-cols-2">
-          <Field label="أقصى عمر للمقطع" htmlFor="field-options.contentMaxAgeHours" error={fieldError('options.contentMaxAgeHours')} hint="أي مقطع أقدم من كذا ما ينعلن. يحميك من سبام المقاطع القديمة لما تضيف حساب جديد.">
+          <Field label={t('settings.maxAge')} htmlFor="field-options.contentMaxAgeHours" error={fieldError('options.contentMaxAgeHours')} hint={t('settings.maxAgeHint')}>
             <NumberField
               id="field-options.contentMaxAgeHours"
               value={draft.options.contentMaxAgeHours}
               onChange={(v) => setOption('contentMaxAgeHours', v)}
               {...OPTION_LIMITS.contentMaxAgeHours}
-              suffix="ساعة"
+              suffix={t('settings.unitHours')}
               invalid={!!fieldError('options.contentMaxAgeHours')}
             />
           </Field>
           <SwitchRow
             className="self-start"
-            title="تجاهل تسجيل البث المعلن"
-            description="إذا البث نفسه انعلن كلايف، ما نرسل إشعار ثاني لتسجيله (VOD / إعادة البث)."
+            title={t('settings.skipVod')}
+            description={t('settings.skipVodDesc')}
             checked={draft.options.skipVodOfAnnouncedLive}
             onChange={(v) => setOption('skipVodOfAnnouncedLive', v)}
           />
         </div>
       </Section>
 
-      <Section id="live" icon={<Radio className="size-[18px]" />} title="خيارات البث" description="كيف تتصرف رسالة البث أثناءه وبعده.">
+      <Section id="live" icon={<Radio className="size-[18px]" />} title={t('settings.live')} description={t('settings.liveDesc')}>
         <div className="grid gap-5 md:grid-cols-2">
           <Field
-            label="مدة دمج البث المتقطع"
+            label={t('settings.merge')}
             htmlFor="field-options.reconnectMergeMinutes"
             error={fieldError('options.reconnectMergeMinutes')}
-            hint="لو البث طاح ورجع خلال هالمدة، نكمل على نفس الرسالة والجلسة بدل إشعار جديد (0 = كل رجعة إشعار جديد)."
+            hint={t('settings.mergeHint')}
           >
             <NumberField
               id="field-options.reconnectMergeMinutes"
               value={draft.options.reconnectMergeMinutes}
               onChange={(v) => setOption('reconnectMergeMinutes', v)}
               {...OPTION_LIMITS.reconnectMergeMinutes}
-              suffix="دقيقة"
+              suffix={t('settings.unitMinutes')}
               invalid={!!fieldError('options.reconnectMergeMinutes')}
             />
           </Field>
           <Field
-            label="تحديث رسالة البث كل"
+            label={t('settings.updateEvery')}
             htmlFor="field-options.liveUpdateMinutes"
             error={fieldError('options.liveUpdateMinutes')}
-            hint="تتحدث الرسالة بعدد المشاهدين والعنوان واللعبة والمنصات (0 = بدون تحديث دوري)."
+            hint={t('settings.updateEveryHint')}
           >
             <NumberField
               id="field-options.liveUpdateMinutes"
               value={draft.options.liveUpdateMinutes}
               onChange={(v) => setOption('liveUpdateMinutes', v)}
               {...OPTION_LIMITS.liveUpdateMinutes}
-              suffix="دقيقة"
+              suffix={t('settings.unitMinutes')}
               invalid={!!fieldError('options.liveUpdateMinutes')}
             />
           </Field>
         </div>
         <div className="mt-4 border-t border-white/[0.05]">
           <SwitchRow
-            title="ملخص بعد البث"
-            description="لما يخلص البث تتحول نفس الرسالة لملخص: المدة، أعلى وأوسط مشاهدين، الألعاب، المنصات وروابط الإعادة."
+            title={t('settings.summary')}
+            description={t('settings.summaryDesc')}
             checked={draft.options.summaryEnabled}
             onChange={(v) => setOption('summaryEnabled', v)}
           />
         </div>
       </Section>
+
+      <div className="pt-4">
+        <h2 className="text-lg font-semibold text-white">{t('features.heading')}</h2>
+        <p className="mt-1 text-sm text-zinc-400">{t('features.headingDesc')}</p>
+      </div>
+
+      <FeatureSections
+        features={draft.features}
+        saved={savedFeatures}
+        onChange={setFeatures}
+        fieldError={fieldError}
+        roles={roles}
+        channels={channels}
+        loading={lookups.isPending}
+        unavailable={lookupsUnavailable}
+        dirty={dirty}
+      />
 
       <SaveBar
         visible={dirty}
@@ -426,7 +454,7 @@ function PlatformToggle({ platform, enabled, onChange }: { platform: Platform; e
       <PlatformTile platform={platform} />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-zinc-100">{meta.label}</p>
-        <p className={cn('text-xs', enabled ? 'text-emerald-400/90' : 'text-zinc-500')}>{enabled ? 'شغّالة' : 'متوقفة'}</p>
+        <p className={cn('text-xs', enabled ? 'text-emerald-400/90' : 'text-zinc-500')}>{enabled ? t('settings.on') : t('settings.off')}</p>
       </div>
       <Switch checked={enabled} onChange={onChange} label={meta.label} />
     </div>

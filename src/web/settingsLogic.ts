@@ -5,7 +5,8 @@
 import type { AppContext } from '../app/context.js';
 import { ValidationError } from '../core/errors.js';
 import { childLogger } from '../core/logger.js';
-import type { GuildOptions, GuildSettings, GuildSettingsPatch, TemplateSpec, Templates } from '../db/models.js';
+import { mergeFeatures, type GuildFeatures, type GuildFeaturesPatch, type GuildOptions, type GuildSettings, type GuildSettingsPatch, type TemplateSpec, type Templates } from '../db/models.js';
+import type { DiscordRoleInfo } from '../services/ports.js';
 import type { SettingsUpdateInput } from './schemas.js';
 
 const log = childLogger('web.settings');
@@ -14,8 +15,10 @@ type TemplateKey = keyof Templates;
 const TEMPLATE_KEYS: TemplateKey[] = ['live', 'summary', 'content'];
 
 const ROLE_FIELDS = ['streamerRoleId', 'liveRoleId', 'pingRoleId'] as const;
+/** #1 — role members toggle with the panel button (the bot hands it out, so the same rules as assigned roles apply). */
+export const NOTIFY_ROLE_FIELD = 'features.notifyRole.roleId';
 /** Roles the bot hands out and takes away by itself: changing them needs Manage Roles (see routes/settings.ts). */
-export const ASSIGNED_ROLE_FIELDS: ReadonlySet<string> = new Set(['streamerRoleId', 'liveRoleId']);
+export const ASSIGNED_ROLE_FIELDS: ReadonlySet<string> = new Set(['streamerRoleId', 'liveRoleId', NOTIFY_ROLE_FIELD]);
 const CHANNEL_FIELDS = ['liveChannelId', 'contentChannelId', 'logChannelId'] as const;
 type RoleField = (typeof ROLE_FIELDS)[number];
 type ChannelField = (typeof CHANNEL_FIELDS)[number];
@@ -38,6 +41,38 @@ export const SETTING_LABELS_AR: Record<string, string> = {
   'options.skipVodOfAnnouncedLive': 'تجاهل إعادة البث المعلن',
   'options.autoStreamerRole': 'رتبة الستريمر التلقائية',
   'options.removeStreamerRoleOnDelete': 'سحب رتبة الستريمر عند الحذف',
+  'features.notifyRole.roleId': 'رتبة الإشعارات',
+  'features.notifyRole.pingOnLive': 'منشن رتبة الإشعارات مع البث',
+  'features.notifyRole.pingOnContent': 'منشن رتبة الإشعارات مع المقاطع',
+  'features.notifyRole.panelChannelId': 'روم لوحة الإشعارات',
+  'features.notifyRole.panelTitle': 'عنوان لوحة الإشعارات',
+  'features.notifyRole.panelDescription': 'وصف لوحة الإشعارات',
+  'features.routing.liveByPlatform': 'توجيه إشعارات البث',
+  'features.routing.contentByPlatform': 'توجيه المقاطع حسب المنصة',
+  'features.routing.contentByKind': 'توجيه المقاطع حسب النوع',
+  'features.clips.minViews': 'أقل مشاهدات للكليب',
+  'features.clips.featuredOnly': 'الكليبات المميزة فقط',
+  'features.clips.mode': 'طريقة نشر الكليبات',
+  'features.clips.digestHour': 'ساعة ملخص الكليبات',
+  'features.clips.digestMax': 'عدد كليبات الملخص',
+  'features.clips.digestChannelId': 'روم ملخص الكليبات',
+  'features.counter.channelId': 'روم العداد',
+  'features.counter.template': 'اسم روم العداد',
+  'features.applications.enabled': 'طلبات الستريمرز',
+  'features.applications.panelChannelId': 'روم لوحة التقديم',
+  'features.applications.reviewChannelId': 'روم مراجعة الطلبات',
+  'features.applications.panelTitle': 'عنوان لوحة التقديم',
+  'features.applications.panelDescription': 'وصف لوحة التقديم',
+  'features.applications.dmApplicant': 'رسالة خاصة للمتقدم',
+  'features.silent.live': 'إشعارات بث صامتة',
+  'features.silent.content': 'إشعارات مقاطع صامتة',
+  'features.linking.enabled': 'ربط الحسابات الرسمي',
+  'features.manualPosts.enabled': 'النشر اليدوي',
+  'features.presence.enabled': 'كشف حالة البث في ديسكورد',
+  'features.presence.scope': 'نطاق كشف البث',
+  'features.presence.notify': 'إشعار بث الحالة',
+  'features.language': 'لغة البوت',
+  'features.timezone': 'المنطقة الزمنية',
 };
 
 function cleanSpec(spec: TemplateSpec): TemplateSpec | null {
@@ -86,6 +121,7 @@ export function mergeSettings(current: GuildSettings, patch: SettingsUpdateInput
     contentKinds: patch.contentKinds ?? current.contentKinds,
     templates: mergeTemplates(current.templates, patch.templates),
     options,
+    features: mergeFeatures(current.features, patch.features as GuildFeaturesPatch | undefined),
   };
 }
 
@@ -100,6 +136,55 @@ export function validateMergedSettings(guildId: string, next: GuildSettings): vo
   if (next.pingMode === 'role' && !next.pingRoleId) {
     throw new ValidationError('اختر الرتبة اللي ينمنشن مع الإشعار', 'pingRoleId');
   }
+  const notifyRoleId = next.features.notifyRole.roleId;
+  if (notifyRoleId === guildId) throw new ValidationError('ما ينفع تختار رتبة @everyone', NOTIFY_ROLE_FIELD);
+  if (notifyRoleId && (notifyRoleId === next.streamerRoleId || notifyRoleId === next.liveRoleId)) {
+    throw new ValidationError('رتبة الإشعارات لازم تكون مختلفة عن رتبة الستريمر ورتبة البث المباشر', NOTIFY_ROLE_FIELD);
+  }
+}
+
+/** Feature sub-keys compared one by one (dot paths "features.<feature>.<key>", or "features.<feature>" for scalars). */
+function featureFields(before: GuildFeatures, after: GuildFeatures): string[] {
+  const changed: string[] = [];
+  for (const key of Object.keys(after) as Array<keyof GuildFeatures>) {
+    const a = before[key] as unknown;
+    const b = after[key] as unknown;
+    if (typeof b === 'object' && b !== null && !Array.isArray(b)) {
+      const prev = (typeof a === 'object' && a !== null ? a : {}) as Record<string, unknown>;
+      for (const sub of Object.keys(b)) {
+        if (JSON.stringify(prev[sub]) !== JSON.stringify((b as Record<string, unknown>)[sub])) changed.push(`features.${key}.${sub}`);
+      }
+    } else if (JSON.stringify(a) !== JSON.stringify(b)) {
+      changed.push(`features.${key}`);
+    }
+  }
+  return changed;
+}
+
+/** Reads a "features.x.y" path from settings. */
+export function featureValue(settings: GuildSettings, field: string): unknown {
+  let cur: unknown = settings;
+  for (const part of field.split('.')) {
+    if (typeof cur !== 'object' || cur === null) return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur;
+}
+
+/** Every channel id referenced by the features (with its field path), the counter channel excluded (it may be a voice channel). */
+export function featureChannelRefs(f: GuildFeatures): Array<{ field: string; channelId: string }> {
+  const refs: Array<{ field: string; channelId: string }> = [];
+  const add = (field: string, id: string | null | undefined) => {
+    if (id) refs.push({ field, channelId: id });
+  };
+  add('features.notifyRole.panelChannelId', f.notifyRole.panelChannelId);
+  add('features.clips.digestChannelId', f.clips.digestChannelId);
+  add('features.applications.panelChannelId', f.applications.panelChannelId);
+  add('features.applications.reviewChannelId', f.applications.reviewChannelId);
+  for (const group of ['liveByPlatform', 'contentByPlatform', 'contentByKind'] as const) {
+    for (const [key, id] of Object.entries(f.routing[group] as Record<string, string | undefined>)) add(`features.routing.${group}.${key}`, id);
+  }
+  return refs;
 }
 
 /** Fields whose value changed between two settings objects (dot paths for options). */
@@ -113,6 +198,7 @@ export function changedFields(before: GuildSettings, after: GuildSettings): stri
   for (const key of Object.keys(after.options) as Array<keyof GuildOptions>) {
     if (before.options[key] !== after.options[key]) changed.push(`options.${key}`);
   }
+  changed.push(...featureFields(before.features, after.features));
   return changed;
 }
 
@@ -129,6 +215,7 @@ export function toPatch(next: GuildSettings): GuildSettingsPatch {
     contentKinds: next.contentKinds,
     templates: next.templates,
     options: next.options,
+    features: next.features,
   };
 }
 
@@ -138,6 +225,8 @@ export function describeChanges(before: GuildSettings, after: GuildSettings, fie
   for (const field of fields) {
     if (field === 'templates') {
       changes.templates = TEMPLATE_KEYS.filter((k) => JSON.stringify(before.templates[k]) !== JSON.stringify(after.templates[k]));
+    } else if (field.startsWith('features.')) {
+      changes[field] = { from: featureValue(before, field) ?? null, to: featureValue(after, field) ?? null };
     } else if (field.startsWith('options.')) {
       const key = field.slice('options.'.length) as keyof GuildOptions;
       changes[field] = { from: before.options[key], to: after.options[key] };
@@ -186,7 +275,19 @@ export async function validateDiscordReferences(ctx: AppContext, guildId: string
     }
   }
 
-  if (channelChanges.length > 0) {
+  const notifyRoleId = after.features.notifyRole.roleId;
+  if (notifyRoleId && notifyRoleId !== before.features.notifyRole.roleId) {
+    const roles = await ctx.discord.roles(guildId).catch((err: unknown) => {
+      log.warn({ err, guildId }, 'Role lookup failed; skipping notification role validation');
+      return null;
+    });
+    if (roles) checkNotifyRole(roles.find((r) => r.id === notifyRoleId));
+  }
+
+  const previous = new Map(featureChannelRefs(before.features).map((r) => [r.field, r.channelId]));
+  const featureChannelChanges = featureChannelRefs(after.features).filter((r) => previous.get(r.field) !== r.channelId);
+
+  if (channelChanges.length > 0 || featureChannelChanges.length > 0) {
     const channels = await ctx.discord.textChannels(guildId).catch((err: unknown) => {
       log.warn({ err, guildId }, 'Channel lookup failed; skipping channel validation');
       return null;
@@ -197,6 +298,26 @@ export async function validateDiscordReferences(ctx: AppContext, guildId: string
           throw new ValidationError('هذا الروم مو موجود في السيرفر أو مو روم كتابي يقدر البوت يشوفه', field);
         }
       }
+      for (const { field, channelId } of featureChannelChanges) {
+        if (!channels.some((c) => c.id === channelId)) {
+          throw new ValidationError('هذا الروم مو موجود في السيرفر أو مو روم كتابي يقدر البوت يشوفه', field);
+        }
+      }
     }
+  }
+}
+
+/** #1 — the notification role is handed out by the bot on a button click: it must be assignable and harmless. */
+function checkNotifyRole(role: DiscordRoleInfo | undefined): void {
+  if (!role) throw new ValidationError('هذي الرتبة مو موجودة في السيرفر', NOTIFY_ROLE_FIELD);
+  if (role.managed) throw new ValidationError(`الرتبة "${role.name}" تابعة لبوت أو تكامل، وديسكورد ما يسمح للبوت يعطيها لأحد`, NOTIFY_ROLE_FIELD);
+  if (role.elevated) {
+    throw new ValidationError(
+      `الرتبة "${role.name}" فيها صلاحيات إدارية (مثل Administrator أو Manage Roles أو Ban Members)، والبوت يعطي ${SETTING_LABELS_AR[NOTIFY_ROLE_FIELD]} لأي عضو يضغط الزر، فأي أحد بياخذ هذي الصلاحيات. اختر رتبة بدون صلاحيات إدارية`,
+      NOTIFY_ROLE_FIELD,
+    );
+  }
+  if (!role.assignable) {
+    throw new ValidationError(`الرتبة "${role.name}" أعلى من رتبة البوت أو ما يقدر البوت يعطيها، انقل رتبة البوت فوقها`, NOTIFY_ROLE_FIELD);
   }
 }

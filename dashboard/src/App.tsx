@@ -5,6 +5,7 @@ import { onUnauthorized } from './api/client';
 import { createQueryClient, installSessionHooks, keys } from './api/queries';
 import { ConfirmHost } from './components/ConfirmHost';
 import { Toaster } from './components/Toaster';
+import { I18nProvider, langStore } from './i18n';
 import { AuthGate } from './pages/AuthGate';
 import { GuildLayout } from './pages/GuildLayout';
 import { GuildPickerPage, HomeRedirect } from './pages/GuildPickerPage';
@@ -16,6 +17,10 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const TemplatesPage = lazy(() => import('./pages/TemplatesPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const ActivityPage = lazy(() => import('./pages/ActivityPage'));
+const ApplicationsPage = lazy(() => import('./pages/ApplicationsPage'));
+const ManualPostPage = lazy(() => import('./pages/ManualPostPage'));
+const SessionDetailPage = lazy(() => import('./pages/SessionDetailPage'));
+const StreamerProfilePage = lazy(() => import('./pages/StreamerProfilePage'));
 const SystemPage = lazy(() => import('./pages/SystemPage'));
 const StandaloneSystemPage = lazy(() => import('./pages/SystemPage').then((m) => ({ default: m.StandaloneSystemPage })));
 
@@ -34,6 +39,10 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <OverviewPage /> },
           { path: 'streamers/:streamerId?', element: <StreamersPage /> },
+          { path: 'streamers/:streamerId/stats', element: <StreamerProfilePage /> },
+          { path: 'sessions/:sessionId', element: <SessionDetailPage /> },
+          { path: 'applications', element: <ApplicationsPage /> },
+          { path: 'manual-post', element: <ManualPostPage /> },
           { path: 'settings', element: <SettingsPage /> },
           { path: 'templates', element: <TemplatesPage /> },
           { path: 'history', element: <HistoryPage /> },
@@ -56,11 +65,16 @@ export function App() {
     return onUnauthorized(() => void client.invalidateQueries({ queryKey: keys.me }));
   }, [client]);
 
+  // Server-provided text (error messages, diagnostics) follows x-ui-lang: refetch it after a switch.
+  useEffect(() => langStore.subscribe(() => void client.invalidateQueries()), [client]);
+
   return (
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
-      <Toaster />
-      <ConfirmHost />
+      <I18nProvider>
+        <RouterProvider router={router} />
+        <Toaster />
+        <ConfirmHost />
+      </I18nProvider>
     </QueryClientProvider>
   );
 }

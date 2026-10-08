@@ -4,6 +4,7 @@ import { confirmStore, settleConfirm } from '../lib/confirm';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
 import { Modal } from './ui/Modal';
+import { t } from '../i18n';
 
 /** Renders the app-wide confirm dialog opened via confirmDialog(). */
 export function ConfirmHost() {
@@ -15,8 +16,8 @@ export function ConfirmHost() {
 function ConfirmDialogView({
   title,
   description,
-  confirmLabel = 'تأكيد',
-  cancelLabel = 'إلغاء',
+  confirmLabel = t('common.confirm'),
+  cancelLabel = t('common.cancel'),
   tone = 'default',
   requireText,
 }: {
@@ -51,7 +52,7 @@ function ConfirmDialogView({
       {requireText && (
         <div className="mt-4 space-y-2">
           <p className="text-[13px] text-zinc-400">
-            للتأكيد اكتب <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-medium text-zinc-200">{requireText}</span>
+            {t('confirm.typeToConfirm')} <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-medium text-zinc-200">{requireText}</span>
           </p>
           <Input
             data-autofocus
