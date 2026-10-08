@@ -58,6 +58,21 @@ export function sumViewers(platforms: Array<{ snapshot: Pick<LiveSnapshot, 'view
   return total;
 }
 
+/**
+ * Viewers per platform (#13 samples). Several channels on the same platform add up; a platform whose channels
+ * all hide their count is reported as null (live, but unknown).
+ */
+export function viewersByPlatform(platforms: Array<{ platform: Platform; snapshot: Pick<LiveSnapshot, 'viewers'> }>): Partial<Record<Platform, number | null>> {
+  const out: Partial<Record<Platform, number | null>> = {};
+  for (const p of platforms) {
+    const viewers = sanitizeViewers(p.snapshot.viewers);
+    const current = out[p.platform];
+    if (viewers != null) out[p.platform] = (current ?? 0) + viewers;
+    else if (current === undefined) out[p.platform] = null;
+  }
+  return out;
+}
+
 /** Case/spacing-insensitive identity of a category, so "VALORANT" on Kick and "Valorant" on Twitch merge. */
 export function categoryKey(name: string): string {
   return name.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -89,26 +104,24 @@ export function liveSignature(platforms: LivePlatformView[]): string {
   return JSON.stringify(parts);
 }
 
+/**
+ * Union of [start, end] intervals, sorted, with overlapping/touching ones merged. Empty, inverted or non-finite
+ * intervals are ignored.
+ */
+export function mergeIntervals(intervals: Array<[number, number]>): Array<[number, number]> {
+  const sorted = intervals.filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s).sort((a, b) => a[0] - b[0]);
+  const out: Array<[number, number]> = [];
+  for (const [s, e] of sorted) {
+    const last = out[out.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else out.push([s, e]);
+  }
+  return out;
+}
+
 /** Total length of the union of [start, end] intervals (overlaps counted once, gaps excluded). */
 export function mergedDurationMs(intervals: Array<[number, number]>): number {
-  const sorted = intervals.filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s).sort((a, b) => a[0] - b[0]);
-  let total = 0;
-  let curStart = Number.NaN;
-  let curEnd = Number.NaN;
-  for (const [s, e] of sorted) {
-    if (Number.isNaN(curStart)) {
-      curStart = s;
-      curEnd = e;
-    } else if (s <= curEnd) {
-      curEnd = Math.max(curEnd, e);
-    } else {
-      total += curEnd - curStart;
-      curStart = s;
-      curEnd = e;
-    }
-  }
-  if (!Number.isNaN(curStart)) total += curEnd - curStart;
-  return total;
+  return mergeIntervals(intervals).reduce((total, [s, e]) => total + (e - s), 0);
 }
 
 /** Arabic counted noun: 1 → singular, 2 → dual, 3–10 → plural, otherwise singular after the number. */

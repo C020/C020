@@ -1,7 +1,12 @@
 /**
  * Pure builders for every message the bot posts: the combined live notification, the post-stream summary,
- * the minimal "stream ended" card and new-content notifications, plus a converter to the dashboard preview
- * shape. No I/O and no clock reads unless `now` is omitted, so everything here is unit-tested.
+ * the minimal "stream ended" card, new-content notifications, the daily clip digest (#6) and presence-only live
+ * cards (#15), plus a converter to the dashboard preview shape. No I/O and no clock reads unless `now` is omitted,
+ * so everything here is unit-tested.
+ *
+ * #16 — every built-in label, field name, button, content kind and duration follows the guild's
+ * `features.language`; templates resolve per field: preview override → streamer template (#5) → guild template →
+ * default of the guild language.
  *
  * Untrusted text (titles, names, categories) is escaped wherever Discord renders markdown; URLs are
  * validated because a single invalid URL makes Discord reject the whole message.
@@ -9,9 +14,9 @@
 import type { APIActionRowComponent, APIButtonComponentWithURL, APIEmbed, APIEmbedField } from 'discord.js';
 import { ButtonStyle, ComponentType } from 'discord.js';
 import type { Platform } from '../core/types.js';
-import { CONTENT_KIND_LABELS_AR, PLATFORM_COLORS, PLATFORM_LABELS } from '../core/types.js';
-import type { TemplateSpec } from '../db/models.js';
-import type { ContentView, LivePlatformView, LiveView, SummaryView } from '../services/ports.js';
+import { PLATFORM_COLORS, PLATFORM_LABELS } from '../core/types.js';
+import type { GuildSettings, Language, Streamer, TemplateSpec } from '../db/models.js';
+import type { ContentView, DigestView, LivePlatformView, LiveView, PresenceLiveView, SummaryView } from '../services/ports.js';
 import type { MessagePreview } from '../shared/api.js';
 import { DEFAULT_PLATFORM_EMOJIS, type EmojiRef, ICONS, type PlatformEmojis } from './emojis.js';
 import {
@@ -21,12 +26,14 @@ import {
   formatClock,
   formatDurationShort,
   formatNumber,
-  joinAr,
+  maskedLink,
   safeUrl,
   truncate,
 } from './format.js';
-import { composeContent, type PingSpec } from './mentions.js';
-import { DISCORD_LIMITS, renderTemplate, resolveTemplate, type TemplateType, type TemplateVars } from './templates.js';
+import { contentKindLabel, joinList, langOf, tm, viewersText } from './i18n/messages.js';
+import { buildPing, composeContent, type PingSpec } from './mentions.js';
+import { type SampleIdentity, sampleIdentityFor, sampleView } from './samples.js';
+import { DISCORD_LIMITS, defaultTemplatesFor, renderTemplate, resolveTemplate, type TemplateType, type TemplateVars } from './templates.js';
 
 export type LinkButtonRow = APIActionRowComponent<APIButtonComponentWithURL>;
 
@@ -48,6 +55,9 @@ export interface RenderOptions {
 
 /** Neutral grey of a finished stream. */
 export const ENDED_COLOR = 0x80848e;
+
+/** Discord's own "Streaming" purple, used for presence-only streams on an unknown platform. */
+export const STREAMING_COLOR = 0x593695;
 
 const MAX_GAMES_LISTED = 8;
 const MAX_PLATFORM_TITLE = 120;
@@ -197,17 +207,17 @@ function primaryCategoryImage(platforms: LivePlatformView[]): string | null {
   return null;
 }
 
-function platformLines(p: LivePlatformView, streamerName: string, primaryTitle: string): string {
+function platformLines(p: LivePlatformView, streamerName: string, primaryTitle: string, lang: Language): string {
   const lines: string[] = [];
   const name = cleanText(p.channel.displayName) || cleanText(p.channel.handle);
   const channelUrl = safeUrl(p.channel.url) ?? safeUrl(p.snapshot.url);
   if (name && !sameName(name, streamerName)) lines.push(channelUrl ? `[${escapeMarkdown(name)}](${channelUrl})` : escapeMarkdown(name));
 
   const stats: string[] = [];
-  if (p.snapshot.viewers != null) stats.push(`${ICONS.viewers} ${formatNumber(p.snapshot.viewers)} مشاهد`);
+  if (p.snapshot.viewers != null) stats.push(`${ICONS.viewers} ${viewersText(lang, formatNumber(p.snapshot.viewers), p.snapshot.viewers)}`);
   const category = cleanText(p.snapshot.category);
   if (category) stats.push(`${ICONS.game} ${escapeMarkdown(category)}`);
-  lines.push(stats.length > 0 ? stats.join(' • ') : `${ICONS.live} مباشر الحين`);
+  lines.push(stats.length > 0 ? stats.join(' • ') : `${ICONS.live} ${tm(lang, 'live.now')}`);
 
   const title = cleanText(p.snapshot.title);
   if (title && title !== primaryTitle) lines.push(`${ICONS.title} ${escapeMarkdown(truncate(title, MAX_PLATFORM_TITLE))}`);
@@ -215,6 +225,7 @@ function platformLines(p: LivePlatformView, streamerName: string, primaryTitle: 
 }
 
 export function liveTemplateVars(view: LiveView): { plain: TemplateVars; markdown: TemplateVars } {
+  const lang = langOf(view.settings);
   const primary = view.platforms[0];
   const game = firstText(view.platforms, (p) => p.snapshot.category);
   const values: Record<string, string> = {
@@ -222,7 +233,7 @@ export function liveTemplateVars(view: LiveView): { plain: TemplateVars; markdow
     user: view.streamer.displayName,
     mention: mentionOf(view.streamer.discordUserId),
     platform: primary ? PLATFORM_LABELS[primary.platform] : '',
-    platforms: joinAr([...new Set(view.platforms.map((p) => PLATFORM_LABELS[p.platform]))]),
+    platforms: joinList([...new Set(view.platforms.map((p) => PLATFORM_LABELS[p.platform]))], lang),
     title: firstText(view.platforms, (p) => p.snapshot.title),
     game,
     category: game,
@@ -234,10 +245,16 @@ export function liveTemplateVars(view: LiveView): { plain: TemplateVars; markdow
   return varsPair(values, ['mention', 'url', 'started']);
 }
 
+/** Template layers of a view: the streamer's own templates (#5) and the guild language (#16). */
+function layersOf(settings: GuildSettings, streamer: Pick<Streamer, 'templates'> | null | undefined) {
+  return { streamer: streamer?.templates ?? null, language: langOf(settings) };
+}
+
 export function buildLiveMessage(view: LiveView, options: RenderOptions = {}): MessageContent {
   const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
   const now = options.now ?? Date.now();
-  const template = resolveTemplate('live', view.settings.templates, options.template);
+  const lang = langOf(view.settings);
+  const template = resolveTemplate('live', view.settings.templates, options.template, layersOf(view.settings, view.streamer));
   const { plain, markdown } = liveTemplateVars(view);
   const rendered = renderTemplate(template, plain, markdown);
   const primary = view.platforms[0];
@@ -246,13 +263,15 @@ export function buildLiveMessage(view: LiveView, options: RenderOptions = {}): M
   const primaryUrl = String(plain.url ?? '') || null;
 
   const multi = view.platforms.length > 1;
-  const fields = view.platforms.map((p) => field(`${emojiFor(emojis, p.platform).text} ${PLATFORM_LABELS[p.platform]}`, platformLines(p, view.streamer.displayName, primaryTitle), true));
+  const fields = view.platforms.map((p) =>
+    field(`${emojiFor(emojis, p.platform).text} ${PLATFORM_LABELS[p.platform]}`, platformLines(p, view.streamer.displayName, primaryTitle, lang), true),
+  );
   const reporting = view.platforms.filter((p) => p.snapshot.viewers != null).length;
   if (multi && reporting > 1 && view.totalViewers != null) {
-    fields.push(field(`${ICONS.total} المجموع`, `${formatNumber(view.totalViewers)} مشاهد`, true));
+    fields.push(field(`${ICONS.total} ${tm(lang, 'live.total')}`, viewersText(lang, formatNumber(view.totalViewers), view.totalViewers), true));
   }
   const started = discordTimestamp(view.session.startedAt, 'R');
-  if (started) fields.push(field(`${ICONS.started} بدأ`, started, true));
+  if (started) fields.push(field(`${ICONS.started} ${tm(lang, 'live.started')}`, started, true));
 
   const thumbnailUrl = view.platforms.map((p) => safeUrl(p.snapshot.thumbnailUrl)).find(Boolean) ?? null;
   const embed = compactEmbed({
@@ -273,8 +292,8 @@ export function buildLiveMessage(view: LiveView, options: RenderOptions = {}): M
     view.platforms.map((p) => ({
       label:
         sameLabelCount(p.platform) > 1
-          ? `شاهد على ${PLATFORM_LABELS[p.platform]} (${cleanText(p.channel.displayName) || p.channel.handle})`
-          : `شاهد على ${PLATFORM_LABELS[p.platform]}`,
+          ? tm(lang, 'live.watchOnChannel', { platform: PLATFORM_LABELS[p.platform], channel: cleanText(p.channel.displayName) || p.channel.handle })
+          : tm(lang, 'live.watchOn', { platform: PLATFORM_LABELS[p.platform] }),
       url: watchUrl(p),
       emoji: emojiFor(emojis, p.platform).component,
     })),
@@ -319,39 +338,40 @@ function summaryChannels(view: SummaryView): SummaryChannel[] {
 }
 
 export function summaryTemplateVars(view: SummaryView): { plain: TemplateVars; markdown: TemplateVars } {
+  const lang = langOf(view.settings);
   const channels = summaryChannels(view);
   const values: Record<string, string> = {
     name: view.streamer.displayName,
     user: view.streamer.displayName,
     mention: mentionOf(view.streamer.discordUserId),
-    duration: formatDurationShort(view.durationSec),
+    duration: formatDurationShort(view.durationSec, lang),
     peak: view.peakViewers > 0 ? formatNumber(view.peakViewers) : '',
     avg: view.avgViewers != null ? formatNumber(view.avgViewers) : '',
-    games: joinAr(view.categories.map((c) => cleanText(c.name))),
-    platforms: joinAr([...new Set(channels.map((c) => PLATFORM_LABELS[c.platform]))]),
+    games: joinList(view.categories.map((c) => cleanText(c.name)), lang),
+    platforms: joinList([...new Set(channels.map((c) => PLATFORM_LABELS[c.platform]))], lang),
     title: cleanText(view.titles[view.titles.length - 1]),
   };
   return varsPair(values, ['mention']);
 }
 
-function gamesValue(view: SummaryView): string {
+function gamesValue(view: SummaryView, lang: Language): string {
   const games = view.categories.filter((c) => cleanText(c.name));
   if (games.length === 0) return '';
   const lines = games.slice(0, MAX_GAMES_LISTED).map((c) => {
-    const time = c.seconds >= 60 ? ` — ${formatDurationShort(c.seconds)}` : '';
+    const time = c.seconds >= 60 ? ` — ${formatDurationShort(c.seconds, lang)}` : '';
     return `• ${escapeMarkdown(c.name)}${time}`;
   });
-  if (games.length > MAX_GAMES_LISTED) lines.push(`و ${games.length - MAX_GAMES_LISTED} غيرها`);
+  if (games.length > MAX_GAMES_LISTED) lines.push(tm(lang, 'summary.moreGames', { count: games.length - MAX_GAMES_LISTED }));
   return lines.join('\n');
 }
 
-function platformsValue(channels: SummaryChannel[], emojis: PlatformEmojis): string {
+function platformsValue(channels: SummaryChannel[], emojis: PlatformEmojis, lang: Language): string {
   return channels
     .map((c) => {
       const url = safeUrl(c.url);
       const label = PLATFORM_LABELS[c.platform];
       const name = c.displayName ? (url ? `[${escapeMarkdown(c.displayName)}](${url})` : escapeMarkdown(c.displayName)) : label;
-      const peak = c.peak > 0 ? ` — أعلى ${formatNumber(c.peak)}` : '';
+      const peak = c.peak > 0 ? ` — ${tm(lang, 'summary.peakShort', { count: formatNumber(c.peak) })}` : '';
       return `${emojiFor(emojis, c.platform).text} ${label}: ${name}${peak}`;
     })
     .join('\n');
@@ -372,19 +392,22 @@ export function kickVideosUrl(channel: { url: string; handle: string }): string 
   return /^[\w-]{1,64}$/.test(handle) ? `https://kick.com/${handle}/videos` : null;
 }
 
-function summaryButtons(channels: SummaryChannel[], emojis: PlatformEmojis): LinkButtonRow[] {
-  const vods: LinkButtonSpec[] = channels
-    .filter((c) => c.vodUrl)
-    .map((c) => ({ label: `الإعادة على ${PLATFORM_LABELS[c.platform]}`, url: c.vodUrl, emoji: { name: ICONS.vod } }));
-  const kickVideos: LinkButtonSpec[] = channels
-    .filter((c) => c.platform === 'kick' && !c.vodUrl)
-    .map((c) => ({ label: `إعادات ${PLATFORM_LABELS.kick}`, url: kickVideosUrl(c), emoji: { name: ICONS.vod } }));
-  const links: LinkButtonSpec[] = channels.map((c) => ({
-    label: `قناة ${PLATFORM_LABELS[c.platform]}`,
+function channelButtons(channels: SummaryChannel[], emojis: PlatformEmojis, lang: Language): LinkButtonSpec[] {
+  return channels.map((c) => ({
+    label: tm(lang, 'summary.channelOn', { platform: PLATFORM_LABELS[c.platform] }),
     url: c.url,
     emoji: emojiFor(emojis, c.platform).component,
   }));
-  return linkButtonRows([...vods, ...kickVideos, ...links]);
+}
+
+function summaryButtons(channels: SummaryChannel[], emojis: PlatformEmojis, lang: Language): LinkButtonRow[] {
+  const vods: LinkButtonSpec[] = channels
+    .filter((c) => c.vodUrl)
+    .map((c) => ({ label: tm(lang, 'summary.replayOn', { platform: PLATFORM_LABELS[c.platform] }), url: c.vodUrl, emoji: { name: ICONS.vod } }));
+  const kickVideos: LinkButtonSpec[] = channels
+    .filter((c) => c.platform === 'kick' && !c.vodUrl)
+    .map((c) => ({ label: tm(lang, 'summary.replays', { platform: PLATFORM_LABELS.kick }), url: kickVideosUrl(c), emoji: { name: ICONS.vod } }));
+  return linkButtonRows([...vods, ...kickVideos, ...channelButtons(channels, emojis, lang)]);
 }
 
 function summaryAvatar(view: SummaryView, options: RenderOptions): string | null {
@@ -393,7 +416,8 @@ function summaryAvatar(view: SummaryView, options: RenderOptions): string | null
 
 export function buildSummaryMessage(view: SummaryView, options: RenderOptions = {}): MessageContent {
   const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
-  const template = resolveTemplate('summary', view.settings.templates, options.template);
+  const lang = langOf(view.settings);
+  const template = resolveTemplate('summary', view.settings.templates, options.template, layersOf(view.settings, view.streamer));
   const { plain, markdown } = summaryTemplateVars(view);
   const rendered = renderTemplate(template, plain, markdown);
   const channels = summaryChannels(view);
@@ -402,12 +426,12 @@ export function buildSummaryMessage(view: SummaryView, options: RenderOptions = 
   const start = discordTimestamp(view.session.startedAt, 'f');
   const end = discordTimestamp(view.session.endedAt, 't');
   const fields = [
-    field(`${ICONS.duration} المدة`, formatDurationShort(view.durationSec), true),
-    field(`${ICONS.peak} أعلى مشاهدين`, view.peakViewers > 0 ? formatNumber(view.peakViewers) : '—', true),
-    field(`${ICONS.average} متوسط المشاهدين`, view.avgViewers != null ? formatNumber(view.avgViewers) : '—', true),
-    field(`${ICONS.game} الألعاب`, gamesValue(view), false),
-    field(`${ICONS.platforms} المنصات`, platformsValue(channels, emojis), false),
-    start && end ? field(`${ICONS.clock} الوقت`, `من ${start} إلى ${end}`, false) : null,
+    field(`${ICONS.duration} ${tm(lang, 'summary.duration')}`, formatDurationShort(view.durationSec, lang), true),
+    field(`${ICONS.peak} ${tm(lang, 'summary.peak')}`, view.peakViewers > 0 ? formatNumber(view.peakViewers) : '—', true),
+    field(`${ICONS.average} ${tm(lang, 'summary.average')}`, view.avgViewers != null ? formatNumber(view.avgViewers) : '—', true),
+    field(`${ICONS.game} ${tm(lang, 'summary.games')}`, gamesValue(view, lang), false),
+    field(`${ICONS.platforms} ${tm(lang, 'summary.platforms')}`, platformsValue(channels, emojis, lang), false),
+    start && end ? field(`${ICONS.clock} ${tm(lang, 'summary.time')}`, tm(lang, 'summary.timeRange', { start, end }), false) : null,
   ];
 
   const embed = compactEmbed({
@@ -422,25 +446,23 @@ export function buildSummaryMessage(view: SummaryView, options: RenderOptions = 
     timestamp: isoOrUndefined(view.session.endedAt ?? options.now ?? Date.now()),
   });
 
-  return { content: rendered.content, embeds: [embed], components: summaryButtons(channels, emojis) };
+  return { content: rendered.content, embeds: [embed], components: summaryButtons(channels, emojis, lang) };
 }
 
 /** Minimal card used when summaries are disabled, so the channel never keeps a stale "live" message. */
 export function buildEndedMessage(view: SummaryView, options: RenderOptions = {}): MessageContent {
   const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
+  const lang = langOf(view.settings);
   const channels = summaryChannels(view);
   const avatar = summaryAvatar(view, options);
   const embed = compactEmbed({
     author: author(view.streamer.displayName, avatar, channels[0]?.url),
-    title: `${ICONS.ended} انتهى البث`,
-    description: `${ICONS.duration} المدة: ${formatDurationShort(view.durationSec)}`,
+    title: `${ICONS.ended} ${tm(lang, 'ended.title')}`,
+    description: `${ICONS.duration} ${tm(lang, 'ended.duration', { duration: formatDurationShort(view.durationSec, lang) })}`,
     color: ENDED_COLOR,
     timestamp: isoOrUndefined(view.session.endedAt ?? options.now ?? Date.now()),
   });
-  const components = linkButtonRows(
-    channels.map((c) => ({ label: `قناة ${PLATFORM_LABELS[c.platform]}`, url: c.url, emoji: emojiFor(emojis, c.platform).component })),
-  );
-  return { content: '', embeds: [embed], components };
+  return { content: '', embeds: [embed], components: linkButtonRows(channelButtons(channels, emojis, lang)) };
 }
 
 // ───────────────────────────── new content ─────────────────────────────
@@ -451,6 +473,7 @@ function numberField(item: ContentView['item'], key: 'durationSec' | 'viewCount'
 }
 
 export function contentTemplateVars(view: ContentView): { plain: TemplateVars; markdown: TemplateVars } {
+  const lang = langOf(view.settings);
   const duration = numberField(view.item, 'durationSec');
   const views = numberField(view.item, 'viewCount');
   const values: Record<string, string> = {
@@ -458,7 +481,7 @@ export function contentTemplateVars(view: ContentView): { plain: TemplateVars; m
     user: view.streamer.displayName,
     mention: mentionOf(view.streamer.discordUserId),
     platform: PLATFORM_LABELS[view.channel.platform],
-    kind: CONTENT_KIND_LABELS_AR[view.item.kind] ?? 'مقطع',
+    kind: contentKindLabel(view.item.kind, lang),
     title: view.item.title,
     url: safeUrl(view.item.url) ?? '',
     channel: view.channel.displayName,
@@ -471,7 +494,8 @@ export function contentTemplateVars(view: ContentView): { plain: TemplateVars; m
 
 export function buildContentMessage(view: ContentView, options: RenderOptions = {}): MessageContent {
   const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
-  const template = resolveTemplate('content', view.settings.templates, options.template);
+  const lang = langOf(view.settings);
+  const template = resolveTemplate('content', view.settings.templates, options.template, layersOf(view.settings, view.streamer));
   const { plain, markdown } = contentTemplateVars(view);
   const rendered = renderTemplate(template, plain, markdown);
   const platform = view.channel.platform;
@@ -481,9 +505,9 @@ export function buildContentMessage(view: ContentView, options: RenderOptions = 
   const views = numberField(view.item, 'viewCount');
   const published = discordTimestamp(view.item.publishedAt, 'R');
   const fields = [
-    duration != null ? field(`${ICONS.duration} المدة`, formatClock(duration), true) : null,
-    views != null ? field(`${ICONS.views} المشاهدات`, formatNumber(views), true) : null,
-    published ? field(`${ICONS.published} نُشر`, published, true) : null,
+    duration != null ? field(`${ICONS.duration} ${tm(lang, 'content.duration')}`, formatClock(duration), true) : null,
+    views != null ? field(`${ICONS.views} ${tm(lang, 'content.views')}`, formatNumber(views), true) : null,
+    published ? field(`${ICONS.published} ${tm(lang, 'content.published')}`, published, true) : null,
   ];
 
   const embed = compactEmbed({
@@ -499,10 +523,197 @@ export function buildContentMessage(view: ContentView, options: RenderOptions = 
   });
 
   const components = linkButtonRows([
-    { label: 'شاهد', url, emoji: emojiFor(emojis, platform).component },
-    { label: 'القناة', url: view.channel.url, emoji: { name: ICONS.channel } },
+    { label: tm(lang, 'content.watch'), url, emoji: emojiFor(emojis, platform).component },
+    { label: tm(lang, 'content.channel'), url: view.channel.url, emoji: { name: ICONS.channel } },
   ]);
   return { content: rendered.content, embeds: [embed], components };
+}
+
+// ───────────────────────────── #6 daily clip digest ─────────────────────────────
+
+const DIGEST_DESCRIPTION_BUDGET = 3_900;
+const DIGEST_TITLE_MAX = 100;
+const DIGEST_BUTTONS = 5;
+
+function digestTitle(entry: DigestView['entries'][number], lang: Language): string {
+  return cleanText(entry.item.title) || contentKindLabel(entry.item.kind, lang);
+}
+
+function digestViews(entry: DigestView['entries'][number]): number | null {
+  const value = entry.item.viewCount;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** One line per clip: "**N.** 💜 [title](url) — streamer • 👀 views". */
+function digestLine(entry: DigestView['entries'][number], index: number, emojis: PlatformEmojis, lang: Language): string {
+  const title = truncate(digestTitle(entry, lang), DIGEST_TITLE_MAX);
+  const who = cleanText(entry.streamer?.displayName) || cleanText(entry.channel.displayName) || cleanText(entry.channel.handle);
+  const views = digestViews(entry);
+  const parts = [`**${index + 1}.** ${emojiFor(emojis, entry.channel.platform).text} ${maskedLink(title, entry.item.url)}`];
+  if (who) parts.push(` — ${escapeMarkdown(who)}`);
+  if (views != null) parts.push(` • ${ICONS.viewers} ${formatNumber(views)}`);
+  return parts.join('');
+}
+
+/**
+ * The daily clip digest: one embed listing the best clips (within Discord's description limit), the top clip's
+ * image and link buttons for the top 5. Never pings (it is a daily recap, not a live alert).
+ */
+export function buildDigestMessage(view: DigestView, options: RenderOptions = {}): MessageContent {
+  const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
+  const lang = langOf(view.settings);
+  const entries = view.entries;
+
+  const lines: string[] = [];
+  let length = 0;
+  for (const [i, entry] of entries.entries()) {
+    const line = digestLine(entry, i, emojis, lang);
+    const remainingAfter = entries.length - i - 1;
+    // Keep room for the "… and N more" line whenever more clips follow.
+    const reserve = remainingAfter > 0 ? 40 : 0;
+    if (length + line.length + 1 + reserve > DIGEST_DESCRIPTION_BUDGET) {
+      lines.push(tm(lang, 'digest.more', { count: entries.length - i }));
+      break;
+    }
+    lines.push(line);
+    length += line.length + 1;
+  }
+
+  const total = Math.max(view.total, entries.length);
+  const footerText =
+    total > entries.length
+      ? tm(lang, 'digest.footer.capped', { shown: entries.length, total })
+      : entries.length === 1
+        ? tm(lang, 'digest.footer.one')
+        : tm(lang, 'digest.footer.all', { count: entries.length });
+
+  const top = entries[0];
+  const date = cleanText(view.date);
+  const embed = compactEmbed({
+    title: truncate(`${ICONS.content} ${tm(lang, 'digest.title')}${date ? ` • ${date}` : ''}`, DISCORD_LIMITS.title),
+    description: lines.join('\n') || undefined,
+    color: top ? (top.streamer?.color ?? PLATFORM_COLORS[top.channel.platform]) : PLATFORM_COLORS.twitch,
+    image: image(top?.item.thumbnailUrl),
+    footer: footer(footerText),
+    timestamp: isoOrUndefined(options.now ?? Date.now()),
+  });
+
+  const components = linkButtonRows(
+    entries.slice(0, DIGEST_BUTTONS).map((entry, i) => ({
+      label: `${i + 1}. ${digestTitle(entry, lang)}`,
+      url: entry.item.url,
+      emoji: emojiFor(emojis, entry.channel.platform).component,
+    })),
+  );
+  return { content: '', embeds: [embed], components };
+}
+
+// ───────────────────────────── #15 presence-only streams ─────────────────────────────
+
+function presenceName(view: PresenceLiveView): string {
+  return cleanText(view.streamer?.displayName) || cleanText(view.displayName);
+}
+
+export function presenceTemplateVars(view: PresenceLiveView): { plain: TemplateVars; markdown: TemplateVars } {
+  const name = presenceName(view);
+  const platform = view.platform ? PLATFORM_LABELS[view.platform] : '';
+  const game = cleanText(view.game);
+  const values: Record<string, string> = {
+    name,
+    user: cleanText(view.displayName) || name,
+    mention: mentionOf(view.userId),
+    platform,
+    platforms: platform,
+    title: cleanText(view.title),
+    game,
+    category: game,
+    viewers: '',
+    url: safeUrl(view.url) ?? '',
+    started: discordTimestamp(view.startedAt, 'R') ?? '',
+    handle: '',
+  };
+  return varsPair(values, ['mention', 'url', 'started']);
+}
+
+function presenceAvatar(view: PresenceLiveView, options: RenderOptions): string | null {
+  return safeUrl(options.avatarUrl) ?? safeUrl(view.avatarUrl);
+}
+
+/**
+ * Simple live card for a stream detected only through the member's Discord "Streaming" status. Uses the live
+ * template (streamer layer included) so customized wording applies; the built-in "updates automatically" footer is
+ * replaced by "from Discord status" because presence cards are not refreshed.
+ */
+export function buildPresenceLiveMessage(view: PresenceLiveView, options: RenderOptions = {}): MessageContent {
+  const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
+  const lang = langOf(view.settings);
+  const template = resolveTemplate('live', view.settings.templates, options.template, layersOf(view.settings, view.streamer));
+  const { plain, markdown } = presenceTemplateVars(view);
+  const rendered = renderTemplate(template, plain, markdown);
+  const url = safeUrl(view.url);
+  const avatar = presenceAvatar(view, options);
+  const usesDefaultFooter = template.footer === defaultTemplatesFor(lang).live.footer;
+
+  const started = discordTimestamp(view.startedAt, 'R');
+  const fields = [
+    view.platform ? field(`${ICONS.platforms} ${tm(lang, 'presence.platform')}`, `${emojiFor(emojis, view.platform).text} ${PLATFORM_LABELS[view.platform]}`, true) : null,
+    field(`${ICONS.game} ${tm(lang, 'presence.game')}`, escapeMarkdown(view.game), true),
+    started ? field(`${ICONS.started} ${tm(lang, 'live.started')}`, started, true) : null,
+  ];
+
+  const embed = compactEmbed({
+    author: author(presenceName(view), avatar, url),
+    title: rendered.title || undefined,
+    url: url ?? undefined,
+    description: rendered.description || undefined,
+    color: template.color ?? view.streamer?.color ?? (view.platform ? PLATFORM_COLORS[view.platform] : STREAMING_COLOR),
+    fields: fields.filter((f): f is APIEmbedField => f !== null),
+    thumbnail: image(avatar),
+    footer: footer(usesDefaultFooter ? `${ICONS.platforms} ${tm(lang, 'presence.footer')}` : rendered.footer),
+    timestamp: isoOrUndefined(view.startedAt) ?? isoOrUndefined(options.now ?? Date.now()),
+  });
+
+  const components = linkButtonRows([
+    {
+      label: view.platform ? tm(lang, 'live.watchOn', { platform: PLATFORM_LABELS[view.platform] }) : tm(lang, 'presence.watch'),
+      url,
+      emoji: view.platform ? emojiFor(emojis, view.platform).component : { name: ICONS.live },
+    },
+  ]);
+  return { content: rendered.content, embeds: [embed], components };
+}
+
+/** Short "stream ended" card replacing a presence live card (never pings, never silent-flagged: it is an edit). */
+export function buildPresenceEndedMessage(view: PresenceLiveView, options: RenderOptions = {}): MessageContent {
+  const emojis = options.emojis ?? DEFAULT_PLATFORM_EMOJIS;
+  const lang = langOf(view.settings);
+  const url = safeUrl(view.url);
+  const avatar = presenceAvatar(view, options);
+  const startMs = Date.parse(view.startedAt);
+  const endValue = view.endedAt ? Date.parse(view.endedAt) : (options.now ?? Date.now());
+  const endMs = Number.isFinite(endValue) ? endValue : (options.now ?? Date.now());
+  const lines: string[] = [];
+  const title = cleanText(view.title);
+  if (title) lines.push(`**${escapeMarkdown(truncate(title, MAX_PLATFORM_TITLE))}**`);
+  if (Number.isFinite(startMs)) {
+    lines.push(`${ICONS.duration} ${tm(lang, 'ended.duration', { duration: formatDurationShort(Math.max(0, endMs - startMs) / 1000, lang) })}`);
+  }
+  const embed = compactEmbed({
+    author: author(presenceName(view), avatar, url),
+    title: `${ICONS.ended} ${tm(lang, 'ended.title')}`,
+    description: lines.join('\n') || undefined,
+    color: ENDED_COLOR,
+    footer: footer(`${ICONS.platforms} ${tm(lang, 'presence.footer')}`),
+    timestamp: isoOrUndefined(endMs),
+  });
+  const components = linkButtonRows([
+    {
+      label: view.platform ? tm(lang, 'summary.channelOn', { platform: PLATFORM_LABELS[view.platform] }) : tm(lang, 'presence.channel'),
+      url,
+      emoji: view.platform ? emojiFor(emojis, view.platform).component : { name: ICONS.channel },
+    },
+  ]);
+  return { content: '', embeds: [embed], components };
 }
 
 // ───────────────────────────── dashboard preview ─────────────────────────────
@@ -546,4 +757,48 @@ export function buildMessage(
     case 'content':
       return buildContentMessage(view as ContentView, options);
   }
+}
+
+export interface PreviewOptions {
+  /** Template being edited: the guild template, or — with `streamer` — that streamer's template for `type`. */
+  template?: TemplateSpec;
+  /** #5 — preview as this streamer: real name, mention, color and saved template overrides. */
+  streamer?: Streamer | null;
+  now?: number;
+  /** Fake streamer identity when no streamer is given (default: localized sample streamer). */
+  identity?: SampleIdentity;
+  /** Avatar to show (e.g. the streamer's cached Discord avatar). */
+  avatarUrl?: string | null;
+  /** Emojis to render (the dashboard renders text, so unicode by default). */
+  emojis?: PlatformEmojis;
+}
+
+/**
+ * Dashboard preview of a notification type with realistic sample data (pure).
+ *
+ * Without a streamer, `template` overrides the guild template field by field (the Templates page editor).
+ * With a streamer, `template` is that streamer's template being edited: it REPLACES the streamer's saved template
+ * for `type` (an omitted field inherits the guild template, exactly like after saving), so the preview always
+ * matches what will be sent. Live/content previews show the ping new posts would carry; summaries never ping.
+ */
+export function buildPreviewMessage(settings: GuildSettings, type: TemplateType, opts: PreviewOptions = {}): MessagePreview {
+  const now = opts.now ?? Date.now();
+  const base = opts.identity ?? sampleIdentityFor(langOf(settings));
+  const streamer = opts.streamer ?? null;
+  const identity: SampleIdentity = streamer
+    ? { displayName: streamer.displayName, discordUserId: streamer.discordUserId, avatarUrl: opts.avatarUrl ?? base.avatarUrl }
+    : { ...base, avatarUrl: opts.avatarUrl ?? base.avatarUrl };
+  const view = sampleView(type, settings, now, identity);
+  if (streamer) {
+    const templates = { ...(streamer.templates ?? {}) };
+    if (opts.template) templates[type] = opts.template;
+    view.streamer = { ...streamer, templates };
+  }
+  const message = buildMessage(type, view, {
+    emojis: opts.emojis ?? DEFAULT_PLATFORM_EMOJIS,
+    avatarUrl: identity.avatarUrl,
+    template: streamer ? undefined : opts.template,
+    now,
+  });
+  return toPreview(type === 'summary' ? message : applyPing(message, buildPing(settings, type)));
 }

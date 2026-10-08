@@ -57,6 +57,17 @@ export interface RoleServiceDeps {
 /** Why a role could not be used: 'config' needs an admin fix (missing role, hierarchy...), 'transient' may succeed later. */
 type RoleProblem = Extract<RoleChangeOutcome, 'config' | 'transient'>;
 
+/**
+ * Result of a member toggling an opt-in role (#1 notification role):
+ * - added / removed: done (`roleName` for the reply)
+ * - config:     an admin has to fix something (role deleted, hierarchy, Manage Roles, elevated role) — warned once
+ * - transient:  Discord not ready / REST failure — the member may simply retry
+ * - not_member: the member is not in the guild (anymore)
+ */
+export type ToggleRoleResult =
+  | { status: 'added' | 'removed'; roleName: string }
+  | { status: 'config' | 'transient' | 'not_member' };
+
 export class DiscordRoles implements RoleManager {
   private readonly queue = new KeyedQueue();
   private readonly getClient: () => Client | null;
@@ -179,6 +190,84 @@ export class DiscordRoles implements RoleManager {
       }
       return { added, removed };
     });
+  }
+
+  /**
+   * #1 — a member presses the notification-role button: add the role when missing, remove it when held.
+   * Runs on a per-member queue (not the guild queue, so a long reconcile never delays the member's reply) and never
+   * hands out a role with moderation/admin power. Configuration problems are audited (throttled) for the admins.
+   */
+  toggleMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<ToggleRoleResult> {
+    return this.queue
+      .run(`toggle:${guildId}:${userId}`, async (): Promise<ToggleRoleResult> => {
+        const client = this.getClient();
+        if (!client?.isReady()) return { status: 'transient' };
+        if (!isSnowflake(userId) || !isSnowflake(roleId) || roleId === guildId) return { status: 'config' };
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) return { status: 'config' };
+        if (guild.available === false) return { status: 'transient' };
+
+        let role: Role | null = guild.roles.cache.get(roleId) ?? null;
+        if (!role) {
+          try {
+            role = await guild.roles.fetch(roleId);
+          } catch (err) {
+            if (classifyDiscordError(err) !== 'unknown_role') return { status: 'transient' };
+          }
+        }
+        if (!role) {
+          this.warn(guildId, `notify_role_missing:${roleId}`, `رتبة الإشعارات المحددة (${roleId}) غير موجودة في السيرفر — حدّثها من الإعدادات`);
+          return { status: 'config' };
+        }
+        const decision = await this.assignability(guild, role);
+        if (decision === 'transient') return { status: 'transient' };
+        if (!decision.ok) {
+          this.warn(guildId, `notify_role:${decision.code}:${role.id}`, `عضو حاول ياخذ رتبة الإشعارات وما قدر البوت: ${decision.message}`);
+          return { status: 'config' };
+        }
+
+        const member = await this.fetchMember(guild, userId);
+        if (member === 'missing') return { status: 'not_member' };
+        if (member === 'transient') return { status: 'transient' };
+        const want = !member.roles.cache.has(role.id);
+        if (want && isElevatedPermissions(role.permissions?.bitfield ?? 0n)) {
+          this.warn(
+            guildId,
+            `notify_role_elevated:${role.id}`,
+            `رتبة الإشعارات ${role.name} فيها صلاحيات إدارية، فالبوت ما راح يعطيها لأحد — اختر رتبة عادية من الإعدادات`,
+          );
+          return { status: 'config' };
+        }
+        try {
+          if (want) await member.roles.add(role, reason);
+          else await member.roles.remove(role, reason);
+        } catch (err) {
+          switch (classifyDiscordError(err)) {
+            case 'unknown_member':
+              return { status: 'not_member' };
+            case 'unknown_role':
+            case 'unknown_channel':
+            case 'invalid':
+              this.warn(guildId, `notify_role_rejected:${role.id}`, `ديسكورد رفض تعديل رتبة الإشعارات ${role.name} — راجع الرتبة من الإعدادات`);
+              return { status: 'config' };
+            case 'forbidden':
+              this.warn(
+                guildId,
+                `role_forbidden:${role.id}`,
+                `ديسكورد رفض تعديل رتبة ${role.name} — تأكد إن عند البوت صلاحية Manage Roles وإن رتبة البوت فوق رتبة ${role.name}`,
+              );
+              return { status: 'config' };
+            default:
+              log.warn({ guildId, userId, roleId: role.id, err: describeDiscordError(err) }, 'Notification role toggle failed');
+              return { status: 'transient' };
+          }
+        }
+        return { status: want ? 'added' : 'removed', roleName: role.name };
+      })
+      .catch((err): ToggleRoleResult => {
+        log.error({ err, guildId, userId, roleId }, 'Role toggle failed unexpectedly');
+        return { status: 'transient' };
+      });
   }
 
   // ───────────────────────────── internals ─────────────────────────────

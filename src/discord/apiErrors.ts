@@ -13,6 +13,8 @@ export const DiscordErrorCodes = {
   UnknownInteraction: 10062,
   InteractionAlreadyAcknowledged: 40060,
   MissingAccess: 50001,
+  /** DMs closed / no mutual server / blocked. */
+  CannotSendMessagesToUser: 50007,
   MissingPermissions: 50013,
   InvalidFormBody: 50035,
   ThreadArchived: 50083,
@@ -71,6 +73,28 @@ export function classifyDiscordError(err: unknown): DiscordErrorKind {
   if (status === 403) return 'forbidden';
   if (status === 400) return 'invalid';
   return 'transient';
+}
+
+/**
+ * When `err` is a discord.js RateLimitError (thrown for routes we asked REST to reject instead of queueing), the
+ * time to wait in ms; otherwise null. Duck-typed: the class name carries the route ("RateLimitError[/channels/:id]").
+ */
+export function rateLimitRetryAfterMs(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null;
+  const e = err as { name?: unknown; retryAfter?: unknown; timeToReset?: unknown; sublimitTimeout?: unknown };
+  const isRateLimit = (typeof e.name === 'string' && e.name.startsWith('RateLimitError')) || (typeof e.retryAfter === 'number' && typeof e.timeToReset === 'number');
+  if (!isRateLimit) return null;
+  const candidates = [e.retryAfter, e.sublimitTimeout, e.timeToReset].filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  return candidates.length > 0 ? Math.ceil(Math.max(...candidates)) : 0;
+}
+
+/**
+ * REST `rejectOnRateLimit` filter: channel edits (renames, #8 counter) are limited to ~2 per 10 minutes per channel.
+ * discord.js would otherwise hold the request (and its caller) for up to 10 minutes; rejecting lets the counter
+ * service reschedule instead. Every other route keeps the default queueing.
+ */
+export function shouldRejectRateLimit(data: { route: string; method: string }): boolean {
+  return data.route === '/channels/:id' && String(data.method).toUpperCase() === 'PATCH';
 }
 
 /** Short text for logs (never shown to users). */

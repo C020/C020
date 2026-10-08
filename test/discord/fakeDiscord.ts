@@ -92,8 +92,12 @@ export class FakeMember {
 export class FakeChannel {
   readonly sent: Array<Record<string, unknown>> = [];
   readonly edits: Array<{ id: string; payload: Record<string, unknown> }> = [];
+  readonly deleted: string[] = [];
+  readonly renames: Array<{ name: string; reason?: string }> = [];
   sendError: unknown = null;
   editError: unknown = null;
+  deleteError: unknown = null;
+  renameError: unknown = null;
   /** Permissions the bot has here (null = same as guild-level). */
   allowed: Set<bigint> | null = null;
   parent: { name: string; rawPosition: number } | null = null;
@@ -144,7 +148,31 @@ export class FakeChannel {
       this.edits.push({ id, payload });
       return { id, channelId: this.id };
     },
+    delete: async (id: string) => {
+      if (this.deleteError) throw this.deleteError;
+      this.deleted.push(id);
+    },
   };
+
+  async setName(name: string, reason?: string) {
+    if (this.renameError) throw this.renameError;
+    this.renames.push({ name, reason });
+    this.name = name;
+    return this;
+  }
+}
+
+export class FakeDmChannel {
+  readonly sent: Array<Record<string, unknown>> = [];
+  sendError: unknown = null;
+
+  constructor(readonly userId: string) {}
+
+  async send(payload: Record<string, unknown>) {
+    if (this.sendError) throw this.sendError;
+    this.sent.push(payload);
+    return { id: '910000000000000001', channelId: `dm-${this.userId}` };
+  }
 }
 
 export class FakeGuild {
@@ -230,7 +258,17 @@ export class FakeGuild {
 export class FakeClient {
   ready = true;
   readonly guilds = { cache: new Collection<string, FakeGuild>() };
-  readonly users = { cache: new Collection<string, { displayAvatarURL: () => string }>() };
+  readonly dms = new Map<string, FakeDmChannel>();
+  createDmError: unknown = null;
+  readonly users = {
+    cache: new Collection<string, { displayAvatarURL: () => string; bot?: boolean }>(),
+    createDM: async (userId: string): Promise<FakeDmChannel> => {
+      if (this.createDmError) throw this.createDmError;
+      const dm = this.dms.get(userId) ?? new FakeDmChannel(userId);
+      this.dms.set(userId, dm);
+      return dm;
+    },
+  };
   channelFetchError: unknown = null;
   readonly channels = {
     cache: new Collection<string, FakeChannel>(),

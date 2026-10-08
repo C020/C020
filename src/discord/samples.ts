@@ -1,11 +1,13 @@
 /**
  * Realistic sample views for the dashboard template preview and "send test" (no DB rows involved).
- * Samples follow the guild's enabled platforms so the preview looks like what members will actually see.
+ * Samples follow the guild's enabled platforms so the preview looks like what members will actually see, and the
+ * guild's language (#16) for the sample texts.
  */
 import type { ContentKind, LiveSnapshot, Platform } from '../core/types.js';
 import { PLATFORMS } from '../core/types.js';
-import type { GuildSettings, LiveSegment, LiveSession, Streamer } from '../db/models.js';
-import type { ContentView, LivePlatformView, LiveView, SummaryView } from '../services/ports.js';
+import type { GuildSettings, Language, LiveSegment, LiveSession, Streamer } from '../db/models.js';
+import type { ContentView, DigestView, LivePlatformView, LiveView, PresenceLiveView, SummaryView } from '../services/ports.js';
+import { langOf } from './i18n/messages.js';
 import type { TemplateType } from './templates.js';
 
 export interface SampleIdentity {
@@ -17,7 +19,41 @@ export interface SampleIdentity {
 
 export const SAMPLE_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
 
-const DEFAULT_IDENTITY: SampleIdentity = { displayName: 'ستريمر تجريبي', discordUserId: '', avatarUrl: SAMPLE_AVATAR };
+/** Name of the fake streamer in previews / test messages, per language. */
+export const SAMPLE_STREAMER_NAMES: Readonly<Record<Language, string>> = Object.freeze({ ar: 'ستريمر تجريبي', en: 'Sample streamer' });
+
+/** Default sample identity for a language (pass the bot's id as `discordUserId` so `{mention}` renders). */
+export function sampleIdentityFor(lang: Language, discordUserId = ''): SampleIdentity {
+  return { displayName: SAMPLE_STREAMER_NAMES[lang] ?? SAMPLE_STREAMER_NAMES.ar, discordUserId, avatarUrl: SAMPLE_AVATAR };
+}
+
+interface SampleTexts {
+  liveTitle: string;
+  earlierTitle: string;
+  contentTitle: string;
+  tag: string;
+  clipTitles: [string, string, string];
+}
+
+const SAMPLE_TEXTS: Record<Language, SampleTexts> = {
+  ar: {
+    liveTitle: 'رانكد فالورانت 🔥 الطريق للريديانت',
+    earlierTitle: 'سوالف الصباح ☕',
+    contentTitle: 'أقوى لقطات الأسبوع 🔥 (لا تفوتكم الأخيرة)',
+    tag: 'عربي',
+    clipTitles: ['ايس خرافي 🔥', 'أقوى ضحكة بالبث 😂', 'كلتش ١ ضد ٤'],
+  },
+  en: {
+    liveTitle: 'Ranked Valorant 🔥 road to Radiant',
+    earlierTitle: 'Morning chat ☕',
+    contentTitle: "Best plays of the week 🔥 (don't miss the last one)",
+    tag: 'English',
+    clipTitles: ['Insane ace 🔥', 'Funniest moment of the stream 😂', '1v4 clutch'],
+  },
+};
+
+const textsFor = (settings: GuildSettings): SampleTexts => SAMPLE_TEXTS[langOf(settings)];
+const identityFor = (settings: GuildSettings, identity: SampleIdentity | undefined): SampleIdentity => identity ?? sampleIdentityFor(langOf(settings));
 
 interface PlatformSample {
   handle: string;
@@ -76,7 +112,6 @@ const PLATFORM_SAMPLES: Record<Platform, PlatformSample> = {
   },
 };
 
-const SAMPLE_TITLE = 'رانكد فالورانت 🔥 الطريق للريديانت';
 const MIN = 60_000;
 
 function enabledPlatforms(settings: GuildSettings, preferred: Platform[]): Platform[] {
@@ -119,7 +154,7 @@ function sampleSession(settings: GuildSettings, startedAt: number, endedAt: numb
       { name: 'VALORANT', imageUrl: VALORANT_BOX_ART, firstSeenAt: iso(startedAt + 25 * MIN), seconds: 110 * 60 },
       { name: 'Just Chatting', imageUrl: null, firstSeenAt: iso(startedAt), seconds: 25 * 60 },
     ],
-    titles: ['سوالف الصباح ☕', SAMPLE_TITLE],
+    titles: [textsFor(settings).earlierTitle, textsFor(settings).liveTitle],
     lastMessageUpdate: null,
     summaryPending: false,
     summaryAttempts: 0,
@@ -133,43 +168,44 @@ function channelInfo(platform: Platform, index: number) {
   return { id: -(index + 1), displayName: s.displayName, handle: s.handle, url: s.url, avatarUrl: SAMPLE_AVATAR };
 }
 
-function liveSnapshot(platform: Platform, startedAt: number, now: number): LiveSnapshot {
+function liveSnapshot(settings: GuildSettings, platform: Platform, startedAt: number, now: number): LiveSnapshot {
   const s = PLATFORM_SAMPLES[platform];
+  const texts = textsFor(settings);
   return {
     platform,
     platformId: `sample-${platform}`,
     isLive: true,
     streamId: `sample-${platform}-stream`,
-    title: SAMPLE_TITLE,
+    title: texts.liveTitle,
     category: s.category,
     categoryImageUrl: s.categoryImageUrl,
     thumbnailUrl: s.thumbnailUrl ? `${s.thumbnailUrl}?t=${now}` : null,
     viewers: s.viewers,
     startedAt: new Date(startedAt).toISOString(),
     url: s.url,
-    language: 'ar',
-    tags: ['عربي'],
+    language: langOf(settings),
+    tags: [texts.tag],
   };
 }
 
-export function sampleLiveView(settings: GuildSettings, now = Date.now(), identity: SampleIdentity = DEFAULT_IDENTITY): LiveView {
+export function sampleLiveView(settings: GuildSettings, now = Date.now(), identity?: SampleIdentity): LiveView {
   const startedAt = now - 47 * MIN;
   const platforms: LivePlatformView[] = enabledPlatforms(settings, ['twitch', 'kick'])
     .slice(0, 2)
-    .map((platform, i) => ({ platform, channel: channelInfo(platform, i), snapshot: liveSnapshot(platform, startedAt, now) }))
+    .map((platform, i) => ({ platform, channel: channelInfo(platform, i), snapshot: liveSnapshot(settings, platform, startedAt, now) }))
     .sort((a, b) => (b.snapshot.viewers ?? -1) - (a.snapshot.viewers ?? -1));
   const totalViewers = platforms.reduce<number | null>((sum, p) => (p.snapshot.viewers == null ? sum : (sum ?? 0) + p.snapshot.viewers), null);
   return {
     guildId: settings.guildId,
     settings,
     session: sampleSession(settings, startedAt, null),
-    streamer: sampleStreamer(settings, identity, now),
+    streamer: sampleStreamer(settings, identityFor(settings, identity), now),
     platforms,
     totalViewers,
   };
 }
 
-export function sampleSummaryView(settings: GuildSettings, now = Date.now(), identity: SampleIdentity = DEFAULT_IDENTITY): SummaryView {
+export function sampleSummaryView(settings: GuildSettings, now = Date.now(), identity?: SampleIdentity): SummaryView {
   const durationSec = 2 * 3600 + 15 * 60;
   const startedAt = now - durationSec * 1000;
   const session = sampleSession(settings, startedAt, now);
@@ -192,7 +228,7 @@ export function sampleSummaryView(settings: GuildSettings, now = Date.now(), ide
     guildId: settings.guildId,
     settings,
     session,
-    streamer: sampleStreamer(settings, identity, now),
+    streamer: sampleStreamer(settings, identityFor(settings, identity), now),
     durationSec,
     peakViewers: session.peakViewers,
     avgViewers: Math.round(session.viewerSum / session.viewerSamples),
@@ -203,7 +239,7 @@ export function sampleSummaryView(settings: GuildSettings, now = Date.now(), ide
   };
 }
 
-export function sampleContentView(settings: GuildSettings, now = Date.now(), identity: SampleIdentity = DEFAULT_IDENTITY): ContentView {
+export function sampleContentView(settings: GuildSettings, now = Date.now(), identity?: SampleIdentity): ContentView {
   const platform = enabledPlatforms(settings, ['youtube', 'tiktok', 'twitch', 'kick'])[0] ?? 'youtube';
   const kinds: ContentKind[] = settings.contentKinds.length > 0 ? settings.contentKinds : ['video'];
   const kind: ContentKind = kinds.includes('video') ? 'video' : (kinds[0] ?? 'video');
@@ -211,20 +247,64 @@ export function sampleContentView(settings: GuildSettings, now = Date.now(), ide
   return {
     guildId: settings.guildId,
     settings,
-    streamer: sampleStreamer(settings, identity, now),
+    streamer: sampleStreamer(settings, identityFor(settings, identity), now),
     channel: { ...channelInfo(platform, 0), platform },
     item: {
       platform,
       platformId: `sample-${platform}`,
       contentId: 'sample-content',
       kind,
-      title: 'أقوى لقطات الأسبوع 🔥 (لا تفوتكم الأخيرة)',
+      title: textsFor(settings).contentTitle,
       url: platform === 'youtube' ? 'https://www.youtube.com/watch?v=jNQXAC9IVRw' : s.url,
       thumbnailUrl: 'https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg',
       publishedAt: new Date(now - 5 * MIN).toISOString(),
       durationSec: 754,
       viewCount: 12500,
     },
+  };
+}
+
+/** #6 — a sample daily clip digest (three Twitch clips, best first). */
+export function sampleDigestView(settings: GuildSettings, now = Date.now(), identity?: SampleIdentity): DigestView {
+  const who = identityFor(settings, identity);
+  const texts = textsFor(settings);
+  const s = PLATFORM_SAMPLES.twitch;
+  const entries: DigestView['entries'] = texts.clipTitles.map((title, i) => ({
+    streamer: sampleStreamer(settings, who, now),
+    channel: { ...channelInfo('twitch', 0), platform: 'twitch' as const },
+    item: {
+      id: -(i + 1),
+      channelId: -1,
+      contentId: `sample-clip-${i + 1}`,
+      kind: 'clip' as const,
+      title,
+      url: `https://clips.twitch.tv/SampleClip${i + 1}`,
+      thumbnailUrl: s.thumbnailUrl,
+      publishedAt: new Date(now - (i + 2) * 60 * MIN).toISOString(),
+      firstSeenAt: new Date(now - (i + 2) * 60 * MIN).toISOString(),
+      announced: false,
+      viewCount: [4210, 2875, 1530][i] ?? 1000,
+    },
+  }));
+  return { guildId: settings.guildId, settings, entries, date: new Date(now).toISOString().slice(0, 10), total: entries.length };
+}
+
+/** #15 — a sample presence-only stream (Discord "Streaming" status). */
+export function samplePresenceView(settings: GuildSettings, now = Date.now(), identity?: SampleIdentity): PresenceLiveView {
+  const who = identityFor(settings, identity);
+  return {
+    guildId: settings.guildId,
+    settings,
+    userId: who.discordUserId,
+    displayName: who.displayName,
+    avatarUrl: who.avatarUrl,
+    streamer: null,
+    url: PLATFORM_SAMPLES.twitch.url,
+    platform: 'twitch',
+    title: textsFor(settings).liveTitle,
+    game: PLATFORM_SAMPLES.twitch.category,
+    startedAt: new Date(now - 12 * MIN).toISOString(),
+    endedAt: null,
   };
 }
 

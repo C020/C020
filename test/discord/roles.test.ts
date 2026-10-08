@@ -411,3 +411,68 @@ describe('DiscordRoles never hands out a role with moderation/admin power', () =
     expect(a.roles.cache.has(STREAMER_ROLE)).toBe(true);
   });
 });
+
+describe('DiscordRoles.toggleMemberRole (#1 notification role)', () => {
+  const NOTIFY = '700000000000000004';
+
+  it('adds the role when missing and removes it when held, without role.* audit noise', async () => {
+    const { roles, guild, roleLog } = setup();
+    guild.addRole(NOTIFY, 'Alerts', 3);
+    const member = guild.addMember(A, 'فهد', { cached: false });
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'زر')).resolves.toEqual({ status: 'added', roleName: 'Alerts' });
+    expect(member.roles.cache.has(NOTIFY)).toBe(true);
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'زر')).resolves.toEqual({ status: 'removed', roleName: 'Alerts' });
+    expect(member.roleCalls).toEqual([
+      { op: 'add', roleId: NOTIFY, reason: 'زر' },
+      { op: 'remove', roleId: NOTIFY, reason: 'زر' },
+    ]);
+    expect(roleLog()).toEqual([]);
+  });
+
+  it('never hands out an elevated role but still lets members drop it', async () => {
+    const { roles, guild, warnings } = setup();
+    guild.addRole(NOTIFY, 'Mods', 3, { permissions: PermissionFlagsBits.BanMembers });
+    const member = guild.addMember(A, 'فهد');
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+    expect(member.roleCalls).toEqual([]);
+    expect(warnings()[0]!.message).toContain('صلاحيات إدارية');
+    member.roles.cache.set(NOTIFY, guild.roles.cache.get(NOTIFY)!);
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'removed', roleName: 'Mods' });
+  });
+
+  it('reports config problems (role deleted, above the bot, Discord 403) with a throttled admin warning', async () => {
+    const { roles, guild, warnings } = setup();
+    guild.addMember(A, 'فهد');
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+    guild.addRole(NOTIFY, 'Alerts', 20);
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+    expect(warnings().map((w) => w.details.key)).toEqual([`notify_role:role_above_bot:${NOTIFY}`, `notify_role_missing:${NOTIFY}`]);
+
+    guild.roles.cache.get(NOTIFY)!.position = 3;
+    guild.members.cache.get(A)!.failNext = { code: 50013 };
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+  });
+
+  it('reports transient failures and members who left', async () => {
+    const { roles, guild, client } = setup();
+    guild.addRole(NOTIFY, 'Alerts', 3);
+    await expect(roles.toggleMemberRole(GUILD, B, NOTIFY, 'x')).resolves.toEqual({ status: 'not_member' });
+    const member = guild.addMember(A, 'فهد');
+    member.failNext = { code: 0 };
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'transient' });
+    client.ready = false;
+    await expect(roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')).resolves.toEqual({ status: 'transient' });
+    client.ready = true;
+    await expect(roles.toggleMemberRole(GUILD, A, GUILD, 'x')).resolves.toEqual({ status: 'config' });
+    await expect(roles.toggleMemberRole('999999999999999999', A, NOTIFY, 'x')).resolves.toEqual({ status: 'config' });
+  });
+
+  it('serializes double clicks per member (deterministic add then remove)', async () => {
+    const { roles, guild } = setup();
+    guild.addRole(NOTIFY, 'Alerts', 3);
+    guild.addMember(A, 'فهد');
+    const [first, second] = await Promise.all([roles.toggleMemberRole(GUILD, A, NOTIFY, 'x'), roles.toggleMemberRole(GUILD, A, NOTIFY, 'x')]);
+    expect([first.status, second.status]).toEqual(['added', 'removed']);
+  });
+});

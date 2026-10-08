@@ -1,16 +1,18 @@
 /** Shared fakes for the services tests (no Discord, no network). */
-import type { ProviderRegistryApi } from '../../src/app/context.js';
+import type { ProviderRegistryApi, StreamingActivity } from '../../src/app/context.js';
 import { ChannelNotFoundError } from '../../src/core/errors.js';
 import { AppEvents, type AppEventMap } from '../../src/core/events.js';
 import type { ChannelRef, ContentItem, LiveSnapshot, Platform, ResolvedChannel } from '../../src/core/types.js';
 import { PLATFORMS } from '../../src/core/types.js';
 import { openDatabase } from '../../src/db/database.js';
-import type { Channel, GuildSettingsPatch, Streamer } from '../../src/db/models.js';
+import type { Channel, GuildSettings, GuildSettingsPatch, Streamer, StreamerApplication } from '../../src/db/models.js';
 import { Repositories } from '../../src/db/repositories.js';
 import type { PlatformProvider } from '../../src/platforms/types.js';
 import { AuditService } from '../../src/services/audit.js';
 import type {
   ContentView,
+  DigestView,
+  DiscordActions,
   DiscordGateway,
   DiscordMemberInfo,
   EditOutcome,
@@ -19,6 +21,8 @@ import type {
   MessageRef,
   MonitorControl,
   Notifier,
+  PresenceLiveView,
+  RenameOutcome,
   RoleChangeOutcome,
   RoleManager,
   SummaryOutcome,
@@ -115,6 +119,48 @@ export class FakeNotifier implements Notifier {
     const ref = { channelId: view.settings.contentChannelId, messageId: `content-${++this.seq}` };
     this.contents.push({ view, ref });
     return ref;
+  }
+
+  // ── v2 ──
+  readonly digests: Array<{ view: DigestView; ref: MessageRef | null }> = [];
+  readonly presencePosts: Array<{ view: PresenceLiveView; ref: MessageRef | null }> = [];
+  readonly presenceEnds: Array<{ ref: MessageRef; view: PresenceLiveView; result: boolean }> = [];
+  /** Upcoming postDigest calls that fail (return null). */
+  failDigest = 0;
+  /** While true, postPresenceLive fails (returns null). */
+  failPresencePosts = false;
+  throwOnPresence = false;
+
+  async postDigest(view: DigestView): Promise<MessageRef | null> {
+    if (this.failDigest > 0) {
+      this.failDigest--;
+      this.digests.push({ view: clone(view), ref: null });
+      return null;
+    }
+    const channelId = view.settings.features.clips.digestChannelId ?? view.settings.contentChannelId;
+    if (!channelId) return null;
+    const ref = { channelId, messageId: `digest-${++this.seq}` };
+    this.digests.push({ view: clone(view), ref });
+    return ref;
+  }
+
+  async postPresenceLive(view: PresenceLiveView): Promise<MessageRef | null> {
+    if (this.throwOnPresence) throw new Error('discord down');
+    const channelId = view.settings.liveChannelId;
+    if (!channelId || this.failPresencePosts) {
+      this.presencePosts.push({ view: clone(view), ref: null });
+      return null;
+    }
+    const ref = { channelId, messageId: `presence-${++this.seq}` };
+    this.presencePosts.push({ view: clone(view), ref });
+    return ref;
+  }
+
+  async endPresenceLive(ref: MessageRef, view: PresenceLiveView): Promise<boolean> {
+    if (this.throwOnPresence) throw new Error('discord down');
+    const result = !this.deleted.has(ref.messageId);
+    this.presenceEnds.push({ ref, view: clone(view), result });
+    return result;
   }
 
   async log(guildId: string, _level: string, message: string): Promise<void> {
@@ -224,6 +270,75 @@ export class FakeGateway implements DiscordGateway {
   }
   async diagnose(guildId: string): Promise<GuildDiagnostics> {
     return { guildId, botInGuild: true, botHasManageRoles: true, problems: [] };
+  }
+}
+
+/** DiscordActions fake: scripted rename outcomes, recorded DMs/reviews, settable Streaming presences. */
+export class FakeDiscordActions implements DiscordActions {
+  readonly renames: Array<{ guildId: string; channelId: string; name: string; outcome: RenameOutcome }> = [];
+  /** Current channel names (rename to the same name → 'unchanged'). */
+  readonly channelNames = new Map<string, string>();
+  /** Outcomes of upcoming renames (consumed one per call; empty = 'ok'/'unchanged'). */
+  readonly renameOutcomes: Array<{ outcome: RenameOutcome; retryAfterMs?: number }> = [];
+  readonly dms: Array<{ userId: string; content: string }> = [];
+  readonly reviews: StreamerApplication[] = [];
+  /** guildId → userId → activity (a guild missing from the map has nobody streaming). */
+  readonly presences = new Map<string, Map<string, StreamingActivity>>();
+  /** While true, streamingPresences reports null (intent unavailable / Discord not ready). */
+  presencesUnavailable = false;
+  readonly presenceCalls: string[] = [];
+  /** What presenceIntentEnabled() reports. */
+  presenceIntent = true;
+
+  /** Member lookups go to the given gateway (when any), like the real DiscordApi. */
+  constructor(private readonly gateway: FakeGateway | null = null) {}
+
+  async fetchMember(guildId: string, userId: string): Promise<DiscordMemberInfo | null> {
+    return this.gateway ? this.gateway.fetchMember(guildId, userId) : null;
+  }
+
+  presenceIntentEnabled(): boolean {
+    return this.presenceIntent;
+  }
+
+  async renameChannel(guildId: string, channelId: string, name: string): Promise<{ outcome: RenameOutcome; retryAfterMs?: number }> {
+    const scripted = this.renameOutcomes.shift();
+    let result: { outcome: RenameOutcome; retryAfterMs?: number };
+    if (scripted) result = scripted;
+    else if (this.channelNames.get(channelId) === name) result = { outcome: 'unchanged' };
+    else result = { outcome: 'ok' };
+    if (result.outcome === 'ok') this.channelNames.set(channelId, name);
+    this.renames.push({ guildId, channelId, name, outcome: result.outcome });
+    return result;
+  }
+
+  async sendDirectMessage(userId: string, message: { content: string }): Promise<boolean> {
+    this.dms.push({ userId, content: message.content });
+    return true;
+  }
+
+  async upsertApplicationReview(application: StreamerApplication, _settings: GuildSettings): Promise<MessageRef | null> {
+    this.reviews.push(application);
+    return null;
+  }
+
+  async streamingPresences(guildId: string): Promise<Map<string, StreamingActivity> | null> {
+    this.presenceCalls.push(guildId);
+    if (this.presencesUnavailable) return null;
+    const map = this.presences.get(guildId);
+    return map ? new Map(map) : new Map();
+  }
+
+  setStreaming(guildId: string, userId: string, activity: StreamingActivity | null): void {
+    let map = this.presences.get(guildId);
+    if (!map) this.presences.set(guildId, (map = new Map()));
+    if (activity) map.set(userId, activity);
+    else map.delete(userId);
+  }
+
+  /** Renames that actually changed the name. */
+  get applied(): string[] {
+    return this.renames.filter((r) => r.outcome === 'ok').map((r) => r.name);
   }
 }
 

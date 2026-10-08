@@ -5,7 +5,10 @@ import {
   compareRolePositions,
   decideRoleAssignability,
   isElevatedPermissions,
+  missingManageChannelPermissions,
   missingPostingPermissions,
+  permissionList,
+  permissionListAr,
   REQUIRED_PERMISSIONS,
 } from '../../src/discord/permissions.js';
 import { planRoleReconcile } from '../../src/discord/roles.js';
@@ -130,5 +133,30 @@ describe('isElevatedPermissions', () => {
     ]) {
       expect(isElevatedPermissions(flag | PermissionFlagsBits.SendMessages)).toBe(true);
     }
+  });
+});
+
+describe('permission texts and channel management (v2)', () => {
+  it('lists permissions in Arabic or English', () => {
+    expect(permissionList(['SendMessages', 'ManageChannels'])).toBe('إرسال الرسائل (Send Messages)، إدارة الروم (Manage Channel)');
+    expect(permissionListAr(['Connect'])).toBe('الاتصال (Connect)');
+    expect(permissionList(['SendMessages', 'ManageChannels'], 'en')).toBe('Send Messages, Manage Channel');
+  });
+
+  it('needs View Channel + Manage Channel to rename, plus Connect for voice channels', () => {
+    const granted = new Set([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageChannels]);
+    expect(missingManageChannelPermissions((f) => granted.has(f))).toEqual([]);
+    expect(missingManageChannelPermissions((f) => granted.has(f), true)).toEqual(['Connect']);
+    expect(missingManageChannelPermissions(() => false, false)).toEqual(['ViewChannel', 'ManageChannels']);
+  });
+
+  it('explains role problems in English when asked', () => {
+    const botRole = { id: '900000000000000001', position: 10 };
+    const above = decideRoleAssignability({ guildId: GUILD, role: role('800000000000000001', 12), bot: { hasManageRoles: true, highestRole: botRole } }, 'en');
+    expect(!above.ok && above.message).toBe('The bot role must be above Streaming Now — in Server Settings → Roles, drag the bot role above it');
+    const noPerm = decideRoleAssignability({ guildId: GUILD, role: role('800000000000000001', 1), bot: { hasManageRoles: false, highestRole: botRole } }, 'en');
+    expect(!noPerm.ok && noPerm.message).toContain('lacks the Manage Roles permission');
+    const managed = decideRoleAssignability({ guildId: GUILD, role: role('800000000000000001', 1, { managed: true }), bot: { hasManageRoles: true, highestRole: botRole } }, 'en');
+    expect(!managed.ok && managed.message).toContain('managed by an integration');
   });
 });

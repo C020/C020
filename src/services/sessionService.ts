@@ -21,6 +21,11 @@
  *   without reposting (only a message that is really gone is reposted); a live-role change that failed
  *   transiently is retried with backoff, and guilds with active or recently ended sessions get a periodic role
  *   reconcile (also right after the Discord gateway reconnects).
+ * - #13 statistics: a viewer sample (total, per platform, primary category) is stored at most once per
+ *   `sampleIntervalMs` per live session, piggybacking on live events and the tick; samples older than
+ *   `sampleRetentionDays` are pruned once a day.
+ * - #15 presence: members that an external source (Discord "Streaming" presence) reports as live keep the live
+ *   role: the guild reconcile adds them to the live set and the end of a platform session does not strip it.
  */
 import type { ProviderRegistryApi, SessionServiceApi } from '../app/context.js';
 import { errorMessage } from '../core/errors.js';
@@ -48,6 +53,7 @@ import {
   sanitizeViewers,
   sortLivePlatforms,
   sumViewers,
+  viewersByPlatform,
 } from './views.js';
 
 const log = childLogger('sessions');
@@ -77,6 +83,12 @@ export interface SessionServiceTiming {
   roleReconcileMs: number;
   /** Backoff of the guild role reconcile scheduled after a transient role change failure (the last delay repeats). */
   roleRetryDelaysMs: number[];
+  /** #13 — minimum spacing between two stored viewer samples of the same session. */
+  sampleIntervalMs: number;
+  /** #13 — how often old samples are pruned. */
+  samplePruneIntervalMs: number;
+  /** #13 — samples older than this many days are deleted. */
+  sampleRetentionDays: number;
 }
 
 export const DEFAULT_SESSION_TIMING: SessionServiceTiming = {
@@ -90,7 +102,21 @@ export const DEFAULT_SESSION_TIMING: SessionServiceTiming = {
   summaryMaxAttempts: 28,
   roleReconcileMs: 10 * 60_000,
   roleRetryDelaysMs: [1, 2, 5, 10].map((m) => m * 60_000),
+  sampleIntervalMs: 60_000,
+  samplePruneIntervalMs: 24 * 3_600_000,
+  sampleRetentionDays: 180,
 };
+
+/**
+ * Timer jitter tolerated by the sample spacing: a 60s tick that fires a few ms "early" relative to the previous
+ * (event-driven) sample must not skip a whole minute.
+ */
+const SAMPLE_JITTER_MS = 1_000;
+
+/** #15 — source of members that count as live without a platform session (Discord Streaming presence). */
+export interface ExtraLiveUsersSource {
+  liveUserIds(guildId: string): Set<string>;
+}
 
 export interface SessionServiceDeps {
   repos: Repositories;
@@ -157,6 +183,8 @@ interface SessionRuntime {
   flushTimer: NodeJS.Timeout | null;
   lastPostAttempt: number;
   lastThumbnail: string | null;
+  /** #13 — when the last viewer sample was stored (undefined = unknown yet, read from the DB once). */
+  lastSampleAt: number | null | undefined;
 }
 
 type Lifecycle = 'existing' | 'created' | 'resumed';
@@ -213,6 +241,10 @@ export class SessionService implements SessionServiceApi {
   private running = false;
   /** When start() was called; the orphan-segment safety net only applies after a full window. */
   private startedAtMs: number | null = null;
+  /** #13 — last sample prune (ms); the first tick prunes. */
+  private lastSamplePruneAt = Number.NEGATIVE_INFINITY;
+  /** #15 — members live through another source (Discord presence); they keep the live role. */
+  private extraLive: ExtraLiveUsersSource | null = null;
 
   constructor(deps: SessionServiceDeps) {
     this.repos = deps.repos;
@@ -269,7 +301,16 @@ export class SessionService implements SessionServiceApi {
       }),
       this.exclusive('summaries', () => this.retryPendingSummaries(false)),
       this.exclusive('roles', () => this.maintainRoles()),
+      this.exclusive('housekeeping', async () => this.pruneSamples()),
     ]);
+  }
+
+  /**
+   * #15 — registers the source of members that are live without a platform session (Discord Streaming presence).
+   * They are part of every live-role reconcile, and ending a platform session does not strip their role.
+   */
+  setExtraLiveUsers(source: ExtraLiveUsersSource): void {
+    this.extraLive = source;
   }
 
   /**
@@ -465,6 +506,7 @@ export class SessionService implements SessionServiceApi {
     this.accrue(session, view, now);
     this.addTitle(session, snapshot.title);
     this.repos.sessions.save(session);
+    this.recordSample(session, view, now);
 
     if (lifecycle !== 'existing' || source === 'live') {
       await this.setLiveRole(scope, true, lifecycle === 'resumed' ? 'رجع للبث' : 'بدأ البث');
@@ -594,6 +636,7 @@ export class SessionService implements SessionServiceApi {
     const view = this.buildLiveView(session, scope.streamer, scope.settings);
     this.accrue(session, view, now);
     this.repos.sessions.save(session);
+    this.recordSample(session, view, now);
     await this.syncMessage(session, view, scope.settings, now, { force: false });
     this.audit.record({
       guildId: scope.guildId,
@@ -733,6 +776,40 @@ export class SessionService implements SessionServiceApi {
     if (session.titles.length > MAX_TITLES) session.titles.splice(0, session.titles.length - MAX_TITLES);
   }
 
+  /**
+   * #13 — stores a viewer sample (total, per platform, primary category) when the previous one of this session is
+   * at least `sampleIntervalMs` old. After a restart the last stored sample decides. Never throws: statistics must
+   * not break live handling.
+   */
+  private recordSample(session: LiveSession, view: LiveView, now: number): void {
+    if (session.status !== 'live' || view.platforms.length === 0) return;
+    try {
+      const rt = this.runtime(session.id);
+      if (rt.lastSampleAt === undefined) rt.lastSampleAt = parseTime(this.repos.samples.last(session.id)?.at) ?? null;
+      const interval = Math.max(0, this.timing.sampleIntervalMs);
+      if (rt.lastSampleAt !== null && now >= rt.lastSampleAt && now - rt.lastSampleAt < Math.max(0, interval - SAMPLE_JITTER_MS)) return;
+      this.repos.samples.add({
+        sessionId: session.id,
+        at: iso(now),
+        totalViewers: view.totalViewers,
+        platforms: viewersByPlatform(view.platforms),
+        category: primaryCategory(view.platforms)?.name ?? null,
+      });
+      rt.lastSampleAt = now;
+    } catch (err) {
+      log.warn({ err, sessionId: session.id }, 'Recording viewer sample failed');
+    }
+  }
+
+  /** #13 — deletes samples older than the retention, at most once per `samplePruneIntervalMs`. */
+  private pruneSamples(): void {
+    const now = this.clock();
+    if (now - this.lastSamplePruneAt < this.timing.samplePruneIntervalMs) return;
+    this.lastSamplePruneAt = now;
+    const removed = this.repos.samples.prune(this.timing.sampleRetentionDays);
+    if (removed > 0) log.info({ removed }, 'Old viewer samples pruned');
+  }
+
   // ───────────────────────────── message rendering ─────────────────────────────
 
   private buildLiveView(session: LiveSession, streamer: Streamer, settings: GuildSettings): LiveView {
@@ -864,6 +941,7 @@ export class SessionService implements SessionServiceApi {
           const view = this.buildLiveView(current, scope.streamer, scope.settings);
           this.accrue(current, view, now);
           this.repos.sessions.save(current);
+          this.recordSample(current, view, now);
           await this.syncMessage(current, view, scope.settings, now, { force: false });
         })
         .catch((err) => log.error({ err, sessionId }, 'Deferred live message edit failed'));
@@ -1060,6 +1138,7 @@ export class SessionService implements SessionServiceApi {
     const view = this.buildLiveView(session, scope.streamer, scope.settings);
     this.accrue(session, view, now);
     this.repos.sessions.save(session);
+    this.recordSample(session, view, now);
     await this.syncMessage(session, view, scope.settings, now, { force: false });
     if (closed > 0) this.emitChanged(scope, 'updated');
   }
@@ -1110,6 +1189,8 @@ export class SessionService implements SessionServiceApi {
     const enabled = this.repos.streamers.list(guildId).filter((s) => s.enabled);
     const liveStreamerIds = new Set(this.repos.sessions.listActive(guildId).map((s) => s.streamerId));
     const liveUserIds = new Set(enabled.filter((s) => liveStreamerIds.has(s.id)).map((s) => s.discordUserId));
+    // #15 — members live through their Discord presence keep (or get) the live role too.
+    for (const userId of this.extraLiveUserIds(guildId)) liveUserIds.add(userId);
     // Always the full registered set: the RoleManager only applies it when options.autoStreamerRole is on
     // (passing an empty set instead could strip manually managed roles).
     const streamerUserIds = new Set(enabled.map((s) => s.discordUserId));
@@ -1151,7 +1232,16 @@ export class SessionService implements SessionServiceApi {
   private runtime(sessionId: number): SessionRuntime {
     let rt = this.runtimes.get(sessionId);
     if (!rt) {
-      rt = { sample: null, category: null, renderedSignature: null, dirty: false, flushTimer: null, lastPostAttempt: 0, lastThumbnail: null };
+      rt = {
+        sample: null,
+        category: null,
+        renderedSignature: null,
+        dirty: false,
+        flushTimer: null,
+        lastPostAttempt: 0,
+        lastThumbnail: null,
+        lastSampleAt: undefined,
+      };
       this.runtimes.set(sessionId, rt);
     }
     return rt;
@@ -1175,6 +1265,12 @@ export class SessionService implements SessionServiceApi {
   private async setLiveRole(scope: Scope, live: boolean, reason: string): Promise<void> {
     const { guildId, streamer } = scope;
     const key = `${guildId}:${streamer.discordUserId}`;
+    if (!live && this.extraLiveUserIds(guildId).has(streamer.discordUserId)) {
+      // #15 — the member still shows a Discord "Streaming" presence: the presence service owns the role now.
+      this.liveRoleRetries.delete(key);
+      log.debug({ guildId, streamerId: streamer.id }, 'Live role kept: member is live through their Discord presence');
+      return;
+    }
     let outcome: RoleChangeOutcome;
     try {
       outcome = await this.roles.setLive(guildId, streamer.discordUserId, live, reason);
@@ -1197,7 +1293,19 @@ export class SessionService implements SessionServiceApi {
 
   /** Whether the member should hold the live role right now (same rule as the guild reconcile). */
   private wantsLiveRole(guildId: string, userId: string): boolean {
+    if (this.extraLiveUserIds(guildId).has(userId)) return true;
     return this.repos.streamers.list(guildId).some((s) => s.enabled && s.discordUserId === userId && this.repos.sessions.getActive(s.id) !== null);
+  }
+
+  /** #15 — members of the guild live through another source; an empty set when none is attached or it fails. */
+  private extraLiveUserIds(guildId: string): Set<string> {
+    if (!this.extraLive) return new Set();
+    try {
+      return new Set(this.extraLive.liveUserIds(guildId));
+    } catch (err) {
+      log.warn({ err, guildId }, 'Reading presence-live members failed');
+      return new Set();
+    }
   }
 
   /**

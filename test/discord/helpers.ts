@@ -5,8 +5,13 @@ import { openDatabase } from '../../src/db/database.js';
 import { defaultGuildSettings, type GuildSettings, type LiveSession, type Streamer } from '../../src/db/models.js';
 import { Repositories } from '../../src/db/repositories.js';
 import { AuditService } from '../../src/services/audit.js';
-import type { ContentView, LivePlatformView, LiveView, MessageRef, SummaryView } from '../../src/services/ports.js';
+import type { ContentView, DigestView, LivePlatformView, LiveView, MessageRef, PresenceLiveView, SummaryView } from '../../src/services/ports.js';
 import type { MessageTransport, OutgoingMessage, TransportResult } from '../../src/discord/transport.js';
+import type { ImageFetcher } from '../../src/discord/attachments.js';
+import type { PlatformEmojis } from '../../src/discord/emojis.js';
+import { DiscordNotifier } from '../../src/discord/notifier.js';
+import { WarnThrottle } from '../../src/discord/util.js';
+import { DEFAULT_GUILD_FEATURES, type GuildFeaturesPatch, mergeFeatures } from '../../src/db/features.js';
 
 export const GUILD = '111111111111111111';
 export const USER = '222222222222222222';
@@ -19,6 +24,11 @@ export const MIN = 60_000;
 
 export function settings(patch: Partial<GuildSettings> = {}): GuildSettings {
   return { ...defaultGuildSettings(GUILD, new Date(T0).toISOString()), ...patch };
+}
+
+/** Settings with optional features patched (deep-merged one level like the settings API). */
+export function withFeatures(features: GuildFeaturesPatch, patch: Partial<GuildSettings> = {}): GuildSettings {
+  return settings({ ...patch, features: mergeFeatures(structuredClone(DEFAULT_GUILD_FEATURES), features) });
 }
 
 export function streamer(patch: Partial<Streamer> = {}): Streamer {
@@ -235,4 +245,64 @@ export function db() {
   const events = new AppEvents();
   const audit = new AuditService(repos, events);
   return { repos, events, audit };
+}
+
+export function digestView(count = 3, patch: Partial<DigestView> = {}): DigestView {
+  const entries: DigestView['entries'] = Array.from({ length: count }, (_, i) => ({
+    streamer: streamer({ id: i + 1, displayName: `ستريمر ${i + 1}` }),
+    channel: { id: 100 + i, platform: 'twitch', displayName: `Streamer${i + 1}`, handle: `streamer${i + 1}`, url: `https://www.twitch.tv/streamer${i + 1}`, avatarUrl: null },
+    item: {
+      id: 1000 + i,
+      channelId: 100 + i,
+      contentId: `clip-${i + 1}`,
+      kind: 'clip',
+      title: `لقطة رقم ${i + 1}`,
+      url: `https://clips.twitch.tv/Clip${i + 1}`,
+      thumbnailUrl: `https://clips-media-assets2.twitch.tv/clip${i + 1}-preview-480x272.jpg`,
+      publishedAt: new Date(T0 - (i + 1) * 60 * MIN).toISOString(),
+      firstSeenAt: new Date(T0 - (i + 1) * 60 * MIN).toISOString(),
+      announced: false,
+      viewCount: 5000 - i * 1000,
+    },
+  }));
+  return { guildId: GUILD, settings: settings({ contentChannelId: CONTENT_CHANNEL }), entries, date: '2026-10-03', total: count, ...patch };
+}
+
+export function presenceView(patch: Partial<PresenceLiveView> = {}): PresenceLiveView {
+  return {
+    guildId: GUILD,
+    settings: settings({ liveChannelId: LIVE_CHANNEL }),
+    userId: USER,
+    displayName: 'Member Name',
+    avatarUrl: 'https://cdn.discordapp.com/avatars/2/member.png',
+    streamer: null,
+    url: 'https://www.twitch.tv/membername',
+    platform: 'twitch',
+    title: 'Chill stream',
+    game: 'Minecraft',
+    startedAt: new Date(T0 - 10 * MIN).toISOString(),
+    endedAt: null,
+    ...patch,
+  };
+}
+
+/** A DiscordNotifier over a FakeTransport and an in-memory DB, with a controllable clock. */
+export function makeNotifier(opts: { emojis?: PlatformEmojis; fetchImage?: ImageFetcher } = {}) {
+  const { repos, audit } = db();
+  const transport = new FakeTransport();
+  let now = T0;
+  const clock = () => now;
+  const notifier = new DiscordNotifier({
+    transport,
+    repos,
+    audit,
+    emojis: opts.emojis ? () => opts.emojis! : undefined,
+    avatarFor: () => null,
+    clock,
+    warnThrottle: new WarnThrottle(60 * 60_000, clock),
+    logBatchDelayMs: 50,
+    fetchImage: opts.fetchImage ?? (async () => null),
+  });
+  const warnings = () => repos.audit.list({ guildId: GUILD }).filter((e) => e.action === 'discord.delivery');
+  return { repos, audit, transport, notifier, warnings, advance: (ms: number) => (now += ms) };
 }

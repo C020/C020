@@ -34,6 +34,9 @@ function checkOptions(options: Option[] | undefined, path: string): void {
       else seenOptional = true;
     }
     for (const choice of option.choices ?? []) expect(choice.name.length).toBeLessThanOrEqual(100);
+    for (const text of Object.values((option as { description_localizations?: Record<string, string> }).description_localizations ?? {})) {
+      expect(text.length, `${path}.${option.name} localization`).toBeLessThanOrEqual(100);
+    }
     checkOptions(option.options, `${path}.${option.name}`);
   }
 }
@@ -41,12 +44,15 @@ function checkOptions(options: Option[] | undefined, path: string): void {
 describe('slash command definitions', () => {
   const defs = commandDefinitions();
 
-  it('defines /live, /streamer and /bot with valid names and descriptions', () => {
-    expect(defs.map((d) => d.name)).toEqual(['live', 'streamer', 'bot']);
+  it('defines /live, /streamer, /bot, /link, /unlink and /post with valid names and descriptions', () => {
+    expect(defs.map((d) => d.name)).toEqual(['live', 'streamer', 'bot', 'link', 'unlink', 'post']);
     for (const def of defs) {
       expect(def.name).toMatch(NAME_RE);
       expect(def.description.length).toBeGreaterThan(0);
       expect(def.description.length).toBeLessThanOrEqual(100);
+      // English descriptions for English Discord clients (Discord has no Arabic locale).
+      expect(def.description_localizations?.['en-US']?.length ?? 0).toBeGreaterThan(0);
+      expect(def.description_localizations?.['en-US']?.length ?? 0).toBeLessThanOrEqual(100);
       checkOptions(def.options as Option[] | undefined, def.name);
       expect(JSON.stringify(def).length).toBeLessThan(8000);
     }
@@ -70,6 +76,7 @@ describe('slash command definitions', () => {
     const botDef = defs.find((d) => d.name === 'bot')!;
     const test = (botDef.options as Option[]).find((o) => o.name === 'test')!;
     expect(test.options![0]!.choices!.map((c) => c.value)).toEqual(['live', 'summary', 'content']);
+    expect((botDef.options as Option[]).map((o) => o.name)).toEqual(['status', 'sync', 'test', 'panel']);
   });
 });
 
@@ -215,5 +222,45 @@ describe('friendlyError', () => {
     expect(friendlyError(new Error('البوت غير متصل'))).toBe('البوت غير متصل');
     expect(friendlyError(new Error('SQLITE_BUSY'))).toContain('صار خطأ غير متوقع');
     expect(friendlyError('weird')).toContain('صار خطأ غير متوقع');
+  });
+});
+
+describe('English command replies (#16)', () => {
+  it('renders /live, /streamer and /bot builders in English', () => {
+    expect(buildLiveNowMessage([], undefined, 'en').embeds![0]!.title).toBe('😴 Nobody is live right now');
+    const single = buildLiveNowMessage([liveView([platformView('twitch', { viewers: 7 })])], undefined, 'en');
+    expect(single.embeds![0]!.title).toBe('🔴 Live now (1)');
+    expect(single.embeds![0]!.footer?.text).toBe('👥 Total viewers: 7');
+    expect(single.components![0]!.components[0]!.label).toBe('Watch on Twitch');
+
+    const card = buildStreamerCard(withAccounts(1, [channel(1)]), { live: false, stats: { sessions: 2, seconds: 5400, peakViewers: 30 }, lang: 'en' });
+    expect(card.description).toContain('⚫ Offline');
+    expect(card.fields![0]!.value).toContain('🔔 Live ✅ • Content ✅');
+    expect(card.fields!.at(-1)).toEqual({ name: '📊 Last 30 days', value: 'Streams: 2 • 1h 30m live • peak viewers: 30', inline: false });
+    expect(card.footer?.text).toMatch(/^Added \d{4}-\d{2}-\d{2}$/);
+
+    expect(buildStreamerList([], new Set(), undefined, 'en').title).toBe('👥 No registered streamers');
+    expect(buildStreamerList([withAccounts(1, [])], new Set(), undefined, 'en').description).toContain('no accounts');
+
+    const status = buildStatusEmbed({
+      diagnostics: { guildId: GUILD, botInGuild: true, botHasManageRoles: true, problems: [] },
+      health: platformHealth([withAccounts(1, [channel(1)])], { platformsEnabled: ['twitch', 'kick'] }),
+      streamers: 1,
+      accounts: 1,
+      liveNow: 0,
+      wsPing: -1,
+      startedAt: T0,
+      lang: 'en',
+    });
+    expect(status.title).toBe('🤖 Bot status');
+    expect(status.description).toContain('✅ Everything is set up');
+    expect(status.fields![0]!.value).toContain('ping unknown');
+    expect(status.fields![2]!.value).toContain('accounts: 1 • live: 0');
+    expect(status.fields![2]!.value).toContain('**Kick**: no accounts');
+  });
+
+  it('localizes the generic error and the failure title', () => {
+    expect(friendlyError(new Error('boom'), 'en')).toContain('Something unexpected went wrong');
+    expect(friendlyError(new ValidationError('Streamer not found'), 'en')).toBe('Streamer not found');
   });
 });

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildPing, composeContent, silentMentions } from '../../src/discord/mentions.js';
 import { applyPing, buildLiveMessage } from '../../src/discord/messages.js';
-import { GUILD, liveView, platformView, ROLE, settings } from './helpers.js';
+import { GUILD, liveView, platformView, ROLE, settings, withFeatures } from './helpers.js';
+
+const NOTIFY = '777777777777777777';
+const notify = (patch: Record<string, unknown> = {}) => ({ notifyRole: { roleId: NOTIFY, ...patch } });
 
 describe('buildPing', () => {
   it('pings nobody by default', () => {
@@ -66,5 +69,65 @@ describe('{mention} never pings', () => {
     expect(final.content.startsWith(`<@&${ROLE}> <@`)).toBe(true);
     expect(ping.allowedMentions.users).toBeUndefined();
     expect(ping.allowedMentions.parse).not.toContain('users');
+  });
+});
+
+describe('buildPing with the opt-in notification role (#1)', () => {
+  it('mentions the notify role on live posts by default (pingOnLive) and not on content posts', () => {
+    const s = withFeatures(notify());
+    expect(buildPing(s, 'live')).toEqual({ content: `<@&${NOTIFY}>`, allowedMentions: { parse: [], roles: [NOTIFY], repliedUser: false } });
+    expect(buildPing(s)).toEqual(buildPing(s, 'live'));
+    expect(buildPing(s, 'content')).toEqual({ content: '', allowedMentions: { parse: [], repliedUser: false } });
+  });
+
+  it('follows pingOnLive / pingOnContent', () => {
+    const contentOnly = withFeatures(notify({ pingOnLive: false, pingOnContent: true }));
+    expect(buildPing(contentOnly, 'live').content).toBe('');
+    expect(buildPing(contentOnly, 'content').content).toBe(`<@&${NOTIFY}>`);
+    expect(buildPing(contentOnly, 'content').allowedMentions.roles).toEqual([NOTIFY]);
+  });
+
+  it('combines with @everyone/@here, allowing exactly those mentions', () => {
+    const ping = buildPing(withFeatures(notify(), { pingMode: 'everyone' }), 'live');
+    expect(ping.content).toBe(`@everyone <@&${NOTIFY}>`);
+    expect(ping.allowedMentions).toEqual({ parse: ['everyone'], roles: [NOTIFY], repliedUser: false });
+    expect(buildPing(withFeatures(notify(), { pingMode: 'here' }), 'live').content).toBe(`@here <@&${NOTIFY}>`);
+  });
+
+  it('combines with the classic role ping and dedupes the same role', () => {
+    const both = buildPing(withFeatures(notify(), { pingMode: 'role', pingRoleId: ROLE }), 'live');
+    expect(both.content).toBe(`<@&${ROLE}> <@&${NOTIFY}>`);
+    expect(both.allowedMentions).toEqual({ parse: [], roles: [ROLE, NOTIFY], repliedUser: false });
+    const same = buildPing(withFeatures(notify(), { pingMode: 'role', pingRoleId: NOTIFY }), 'live');
+    expect(same.content).toBe(`<@&${NOTIFY}>`);
+    expect(same.allowedMentions.roles).toEqual([NOTIFY]);
+  });
+
+  it('keeps the classic ping on content posts even when the notify role does not ping there', () => {
+    const ping = buildPing(withFeatures(notify(), { pingMode: 'role', pingRoleId: ROLE }), 'content');
+    expect(ping.content).toBe(`<@&${ROLE}>`);
+    expect(ping.allowedMentions.roles).toEqual([ROLE]);
+  });
+
+  it('refuses invalid notify role ids and the @everyone role', () => {
+    for (const roleId of [null, '', 'abc', GUILD, ' ']) {
+      const ping = buildPing(withFeatures({ notifyRole: { roleId } }), 'live');
+      expect(ping).toEqual({ content: '', allowedMentions: { parse: [], repliedUser: false } });
+    }
+  });
+
+  it('works with settings objects that have no features (older callers)', () => {
+    const { features: _features, ...legacy } = settings({ pingMode: 'here' });
+    expect(buildPing(legacy, 'live').content).toBe('@here');
+  });
+
+  it('never lets {mention} or role markup in templates ping beyond the configured roles', () => {
+    const view = liveView([platformView('twitch')], {
+      settings: withFeatures(notify(), { templates: { live: { content: '{mention} <@&888888888888888888>' } } }),
+    });
+    const ping = buildPing(view.settings, 'live');
+    const final = applyPing(buildLiveMessage(view), ping);
+    expect(final.content.startsWith(`<@&${NOTIFY}> <@`)).toBe(true);
+    expect(ping.allowedMentions).toEqual({ parse: [], roles: [NOTIFY], repliedUser: false });
   });
 });

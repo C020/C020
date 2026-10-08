@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TEMPLATES, DISCORD_LIMITS, render, renderTemplate, resolveTemplate } from '../../src/discord/templates.js';
+import {
+  DEFAULT_TEMPLATES,
+  DEFAULT_TEMPLATES_BY_LANG,
+  DEFAULT_TEMPLATES_EN,
+  defaultTemplatesFor,
+  DISCORD_LIMITS,
+  render,
+  renderTemplate,
+  resolveTemplate,
+} from '../../src/discord/templates.js';
+import * as shared from '../../src/shared/templates.js';
 
 describe('render', () => {
   it('replaces variables and leaves unknown ones empty', () => {
@@ -58,6 +68,67 @@ describe('resolveTemplate', () => {
     expect(DEFAULT_TEMPLATES.live.title).toBe('🔴 {name} يبث الحين!');
     expect(DEFAULT_TEMPLATES.summary.title).toContain('انتهى بث');
     expect(DEFAULT_TEMPLATES.content.description).toContain('نزّل {kind} جديد على {platform}');
+  });
+});
+
+describe('resolveTemplate layers (#5 streamer templates, #16 language)', () => {
+  it('resolves each field: override → streamer → guild → default', () => {
+    const guild = { live: { title: 'guild title', description: 'guild description', footer: 'guild footer' } };
+    const streamer = { live: { title: 'streamer title', description: 'streamer description' } };
+    const resolved = resolveTemplate('live', guild, { title: 'override title' }, { streamer });
+    expect(resolved).toEqual({
+      content: DEFAULT_TEMPLATES.live.content,
+      title: 'override title',
+      description: 'streamer description',
+      footer: 'guild footer',
+      color: null,
+    });
+  });
+
+  it("treats an empty string in a streamer template as 'empty' and undefined as inherit", () => {
+    const guild = { content: { footer: 'guild footer', title: 'guild title' } };
+    const resolved = resolveTemplate('content', guild, undefined, { streamer: { content: { footer: '' } } });
+    expect(resolved.footer).toBe('');
+    expect(resolved.title).toBe('guild title');
+  });
+
+  it('only applies the streamer template of the same type', () => {
+    expect(resolveTemplate('summary', {}, undefined, { streamer: { live: { title: 'x' } } }).title).toBe(DEFAULT_TEMPLATES.summary.title);
+  });
+
+  it('colors: override key decides, else a valid streamer color, else the guild color', () => {
+    const guild = { live: { color: 0x111111 } };
+    expect(resolveTemplate('live', guild, undefined, { streamer: { live: { color: 0x222222 } } }).color).toBe(0x222222);
+    // A null/invalid streamer color inherits the guild template color.
+    expect(resolveTemplate('live', guild, undefined, { streamer: { live: { color: null } } }).color).toBe(0x111111);
+    expect(resolveTemplate('live', guild, undefined, { streamer: { live: { color: -1 } } }).color).toBe(0x111111);
+    expect(resolveTemplate('live', guild, { color: 0x333333 }, { streamer: { live: { color: 0x222222 } } }).color).toBe(0x333333);
+    expect(resolveTemplate('live', guild, { color: null }, { streamer: { live: { color: 0x222222 } } }).color).toBeNull();
+  });
+
+  it('uses the English defaults for English guilds and Arabic otherwise', () => {
+    expect(resolveTemplate('live', {}, undefined, { language: 'en' }).title).toBe('🔴 {name} is live now!');
+    expect(resolveTemplate('live', {}, undefined, { language: 'ar' }).title).toBe(DEFAULT_TEMPLATES.live.title);
+    expect(resolveTemplate('live', {}, undefined, { language: null }).title).toBe(DEFAULT_TEMPLATES.live.title);
+    // Saved custom templates are used as written, whatever the language.
+    expect(resolveTemplate('live', { live: { title: 'عنوان مخصص' } }, undefined, { language: 'en' }).title).toBe('عنوان مخصص');
+  });
+
+  it('exposes defaults for every language and type, with the same placeholders', () => {
+    expect(DEFAULT_TEMPLATES_BY_LANG.ar).toBe(DEFAULT_TEMPLATES);
+    expect(DEFAULT_TEMPLATES_BY_LANG.en).toBe(DEFAULT_TEMPLATES_EN);
+    expect(defaultTemplatesFor('en')).toBe(DEFAULT_TEMPLATES_EN);
+    expect(defaultTemplatesFor(undefined)).toBe(DEFAULT_TEMPLATES);
+    // The dashboard imports the shared module directly: both stay in sync.
+    expect(shared.DEFAULT_TEMPLATES).toBe(DEFAULT_TEMPLATES);
+    expect(shared.DEFAULT_TEMPLATES_BY_LANG).toBe(DEFAULT_TEMPLATES_BY_LANG);
+    const placeholders = (text: string) => [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
+    for (const type of ['live', 'summary', 'content'] as const) {
+      for (const key of ['content', 'title', 'description', 'footer'] as const) {
+        expect(placeholders(DEFAULT_TEMPLATES_EN[type][key])).toEqual(placeholders(DEFAULT_TEMPLATES[type][key]));
+      }
+    }
+    expect(Object.isFrozen(DEFAULT_TEMPLATES_EN.live)).toBe(true);
   });
 });
 

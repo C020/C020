@@ -7,6 +7,7 @@ import {
   formatDurationShort,
   formatNumber,
   joinAr,
+  maskedLink,
   safeUrl,
   truncate,
 } from '../../src/discord/format.js';
@@ -87,5 +88,21 @@ describe('format helpers', () => {
     expect(joinAr([])).toBe('');
     expect(joinAr(['Twitch'])).toBe('Twitch');
     expect(joinAr(['Twitch', 'Kick', 'YouTube'])).toBe('Twitch، Kick و YouTube');
+  });
+
+  it('formats compact English durations', () => {
+    expect(formatDurationShort(2 * 3600 + 15 * 60, 'en')).toBe('2h 15m');
+    expect(formatDurationShort(45 * 60, 'en')).toBe('45m');
+    expect(formatDurationShort(3 * 3600, 'en')).toBe('3h');
+    expect(formatDurationShort(20, 'en')).toBe('under a minute');
+    expect(formatDurationShort(26 * 3600 + 600, 'en')).toBe('26h 10m');
+    expect(formatDurationShort(45 * 60, 'ar')).toBe('45د');
+  });
+
+  it('builds masked links with escaped text and URLs that cannot break out of the link', () => {
+    expect(maskedLink('a [b]', 'https://example.com/x')).toBe('[a \\[b\\]](https://example.com/x)');
+    expect(maskedLink('clip', 'https://example.com/clip_(1)')).toBe('[clip](https://example.com/clip_%281%29)');
+    expect(maskedLink('no link', 'javascript:alert(1)')).toBe('no link');
+    expect(maskedLink('', 'https://example.com')).toBe('');
   });
 });

@@ -4,7 +4,7 @@
  * implementation on top of discord.js.
  */
 import type { Client, GuildBasedChannel, GuildMember, SendableChannels } from 'discord.js';
-import { PermissionFlagsBits } from 'discord.js';
+import { MessageFlags, PermissionFlagsBits } from 'discord.js';
 import { childLogger } from '../core/logger.js';
 import type { MessageRef } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
@@ -23,6 +23,11 @@ export interface OutgoingMessage extends MessageContent {
    * message's attachments with these (none when omitted), so a re-rendered summary never piles up old uploads.
    */
   files?: MessageFile[];
+  /**
+   * #10 — send without a push/sound notification (Discord "silent" message, flag SuppressNotifications). Only
+   * applies to NEW messages: edits never pass flags.
+   */
+  silent?: boolean;
 }
 
 export type TransportFailure =
@@ -90,6 +95,7 @@ export class DiscordTransport implements MessageTransport {
         embeds: message.embeds,
         components: message.components,
         ...(message.files?.length ? { files: uploads(message.files) } : {}),
+        ...(message.silent ? { flags: MessageFlags.SuppressNotifications as const } : {}),
         allowedMentions: message.allowedMentions,
       });
       return { ok: true, ref: { channelId: sent.channelId, messageId: sent.id } };
@@ -106,7 +112,8 @@ export class DiscordTransport implements MessageTransport {
     try {
       // `content` is always sent so an edit can also clear old text (e.g. the ping when turning into a summary),
       // and allowedMentions is explicit because Discord re-parses mentions on edit. `attachments: []` drops earlier
-      // uploads (a fresh array each time: discord.js appends the new files to it).
+      // uploads (a fresh array each time: discord.js appends the new files to it). Flags (silent) are never sent on
+      // edits: SuppressNotifications only exists for new messages.
       const edited = await resolved.channel.messages.edit(ref.messageId, {
         content: message.content,
         embeds: message.embeds,

@@ -1,8 +1,9 @@
 /**
- * Ping (mention) policy. Nothing in a bot message may notify anyone except the guild's configured ping:
- * every send/edit carries an explicit allowedMentions, so `{mention}` and anything inside titles stay silent.
+ * Ping (mention) policy. Nothing in a bot message may notify anyone except the guild's configured ping (classic
+ * ping mode + the #1 opt-in notification role): every send/edit carries an explicit allowedMentions, so `{mention}`
+ * and anything inside titles stay silent.
  */
-import type { GuildSettings } from '../db/models.js';
+import type { GuildSettings, NotifyRoleFeature } from '../db/models.js';
 import { DISCORD_LIMITS } from './templates.js';
 import { truncate } from './format.js';
 
@@ -28,24 +29,61 @@ export function silentMentions(): AllowedMentions {
 
 export const SILENT_PING: Readonly<PingSpec> = Object.freeze({ content: '', allowedMentions: silentMentions() });
 
+/** Which kind of new post the ping is for (#1: the notification role pings per kind). */
+export type PingKind = 'live' | 'content';
+
+/** Settings the ping depends on (`features` is optional so older/partial settings objects keep working). */
+export type PingSettings = Pick<GuildSettings, 'guildId' | 'pingMode' | 'pingRoleId'> & {
+  features?: { notifyRole?: Partial<Pick<NotifyRoleFeature, 'roleId' | 'pingOnLive' | 'pingOnContent'>> | null } | null;
+};
+
+/** A role id that may be pinged: a valid snowflake that is not the guild id (= the @everyone role). */
+function pingableRole(roleId: string | null | undefined, guildId: string): string | null {
+  const id = typeof roleId === 'string' ? roleId.trim() : '';
+  return SNOWFLAKE_RE.test(id) && id !== guildId ? id : null;
+}
+
 /**
- * Ping for a guild's notifications. Mode "none" (the default) never pings. A role ping needs a valid role
- * id; the guild id itself is the @everyone role and is refused so a role ping can never become a mass ping.
+ * Ping for a guild's new live/content posts (never used for edits, summaries or test messages).
+ *
+ * - Classic `pingMode`: "none" (the default) never pings; "everyone"/"here" allow only the @everyone parse; "role"
+ *   allows exactly `pingRoleId`.
+ * - #1 opt-in notification role (`features.notifyRole.roleId`): mentioned on live posts when `pingOnLive` (default
+ *   on) and on content posts when `pingOnContent` (default off).
+ * Both are combined and deduplicated; allowedMentions lists exactly the roles in the content. A role id equal to the
+ * guild id (@everyone) is refused, so a role ping can never become a mass ping.
  */
-export function buildPing(settings: Pick<GuildSettings, 'guildId' | 'pingMode' | 'pingRoleId'>): PingSpec {
+export function buildPing(settings: PingSettings, kind: PingKind = 'live'): PingSpec {
+  let everyone: '@everyone' | '@here' | null = null;
+  const roles: string[] = [];
   switch (settings.pingMode) {
     case 'everyone':
-      return { content: '@everyone', allowedMentions: { parse: ['everyone'], repliedUser: false } };
+      everyone = '@everyone';
+      break;
     case 'here':
-      return { content: '@here', allowedMentions: { parse: ['everyone'], repliedUser: false } };
+      everyone = '@here';
+      break;
     case 'role': {
-      const roleId = settings.pingRoleId?.trim() ?? '';
-      if (!SNOWFLAKE_RE.test(roleId) || roleId === settings.guildId) return { content: '', allowedMentions: silentMentions() };
-      return { content: `<@&${roleId}>`, allowedMentions: { parse: [], roles: [roleId], repliedUser: false } };
+      const roleId = pingableRole(settings.pingRoleId, settings.guildId);
+      if (roleId) roles.push(roleId);
+      break;
     }
     default:
-      return { content: '', allowedMentions: silentMentions() };
+      break;
   }
+
+  const notify = settings.features?.notifyRole;
+  if (notify) {
+    const roleId = pingableRole(notify.roleId, settings.guildId);
+    const wanted = kind === 'live' ? (notify.pingOnLive ?? true) === true : (notify.pingOnContent ?? false) === true;
+    if (roleId && wanted && !roles.includes(roleId)) roles.push(roleId);
+  }
+
+  if (!everyone && roles.length === 0) return { content: '', allowedMentions: silentMentions() };
+  const content = [...(everyone ? [everyone] : []), ...roles.map((id) => `<@&${id}>`)].join(' ');
+  const allowedMentions: AllowedMentions = { parse: everyone ? ['everyone'] : [], repliedUser: false };
+  if (roles.length > 0) allowedMentions.roles = roles;
+  return { content, allowedMentions };
 }
 
 /** Puts the ping in front of the body, keeping the whole content within Discord's 2000 characters. */

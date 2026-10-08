@@ -1,8 +1,10 @@
 /**
  * Permission rules (pure): what the bot needs, the role-hierarchy decision and channel posting checks.
- * Messages are Arabic because they end up in the dashboard diagnostics and the audit log.
+ * Messages default to Arabic (dashboard diagnostics and the audit log); pass a language for Discord-facing text.
  */
 import { PermissionFlagsBits } from 'discord.js';
+import type { Language } from '../db/features.js';
+import { ti } from './i18n/interactions.js';
 
 /** Permissions requested by the invite link. */
 export const REQUIRED_PERMISSIONS: bigint =
@@ -27,9 +29,28 @@ export const PERMISSION_NAMES_AR = {
   ReadMessageHistory: 'قراءة سجل الرسائل (Read Message History)',
   ManageRoles: 'إدارة الرتب (Manage Roles)',
   MentionEveryone: 'منشن الجميع (Mention @everyone)',
+  ManageChannels: 'إدارة الروم (Manage Channel)',
+  Connect: 'الاتصال (Connect)',
 } as const;
 
 export type PermissionName = keyof typeof PERMISSION_NAMES_AR;
+
+export const PERMISSION_NAMES_EN: Readonly<Record<PermissionName, string>> = {
+  ViewChannel: 'View Channel',
+  SendMessages: 'Send Messages',
+  SendMessagesInThreads: 'Send Messages in Threads',
+  EmbedLinks: 'Embed Links',
+  AttachFiles: 'Attach Files',
+  ReadMessageHistory: 'Read Message History',
+  ManageRoles: 'Manage Roles',
+  MentionEveryone: 'Mention @everyone',
+  ManageChannels: 'Manage Channel',
+  Connect: 'Connect',
+};
+
+export function permissionName(name: PermissionName, lang: Language = 'ar'): string {
+  return lang === 'en' ? PERMISSION_NAMES_EN[name] : PERMISSION_NAMES_AR[name];
+}
 
 /** Permissions needed to post a notification in a channel (threads use their own send permission). */
 export function postingPermissions(isThread: boolean): PermissionName[] {
@@ -41,8 +62,24 @@ export function missingPostingPermissions(has: (flag: bigint) => boolean, isThre
   return postingPermissions(isThread).filter((name) => !has(PermissionFlagsBits[name]));
 }
 
+export function permissionList(names: PermissionName[], lang: Language = 'ar'): string {
+  return names.map((n) => permissionName(n, lang)).join(lang === 'en' ? ', ' : '، ');
+}
+
 export function permissionListAr(names: PermissionName[]): string {
-  return names.map((n) => PERMISSION_NAMES_AR[n]).join('، ');
+  return permissionList(names, 'ar');
+}
+
+/**
+ * Permissions needed to rename a channel (#8 counter). Voice/stage channels also need Connect: Discord refuses
+ * edits of a voice channel the bot cannot connect to.
+ */
+export function manageChannelPermissions(isVoice: boolean): PermissionName[] {
+  return isVoice ? ['ViewChannel', 'ManageChannels', 'Connect'] : ['ViewChannel', 'ManageChannels'];
+}
+
+export function missingManageChannelPermissions(has: (flag: bigint) => boolean, isVoice = false): PermissionName[] {
+  return manageChannelPermissions(isVoice).filter((name) => !has(PermissionFlagsBits[name]));
 }
 
 /**
@@ -105,32 +142,20 @@ export type RoleAssignDecision = { ok: true } | { ok: false; code: RoleAssignPro
  * Can the bot add/remove this role? Administrator does not bypass the hierarchy for bots, so the bot's
  * highest role must rank strictly above the target role.
  */
-export function decideRoleAssignability(input: RoleAssignInput): RoleAssignDecision {
+export function decideRoleAssignability(input: RoleAssignInput, lang: Language = 'ar'): RoleAssignDecision {
   const { role, bot } = input;
   const name = role.name || role.id;
   if (role.id === input.guildId) {
-    return { ok: false, code: 'role_everyone', message: 'الرتبة المختارة هي @everyone وما ينفع تنعطى أو تنشال، اختر رتبة ثانية' };
+    return { ok: false, code: 'role_everyone', message: ti(lang, 'role.everyone') };
   }
   if (role.managed) {
-    return {
-      ok: false,
-      code: 'role_managed',
-      message: `رتبة ${name} تابعة لبوت أو اشتراك (Managed) وما ينفع تنعطى يدوياً، اختر رتبة ثانية`,
-    };
+    return { ok: false, code: 'role_managed', message: ti(lang, 'role.managed', { name }) };
   }
   if (!bot.hasManageRoles) {
-    return {
-      ok: false,
-      code: 'missing_manage_roles',
-      message: `البوت ما عنده صلاحية ${PERMISSION_NAMES_AR.ManageRoles}، فعّلها لرتبة البوت عشان يقدر يعطي رتبة ${name}`,
-    };
+    return { ok: false, code: 'missing_manage_roles', message: ti(lang, 'role.noManageRoles', { perm: permissionName('ManageRoles', lang), name }) };
   }
   if (!bot.highestRole || compareRolePositions(bot.highestRole, role) <= 0) {
-    return {
-      ok: false,
-      code: 'role_above_bot',
-      message: `رتبة البوت لازم تكون فوق رتبة ${name} — من إعدادات السيرفر ← الرتب، اسحب رتبة البوت فوقها`,
-    };
+    return { ok: false, code: 'role_above_bot', message: ti(lang, 'role.aboveBot', { name }) };
   }
   return { ok: true };
 }

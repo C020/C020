@@ -136,3 +136,109 @@ describe('diagnoseGuild', () => {
     expect(result.problems[0]!.message).toContain('Server Members Intent');
   });
 });
+
+describe('diagnoseGuild — v2 features', () => {
+  const NOTIFY_ROLE = '700000000000000004';
+  const PANEL = '300000000000000091';
+  const APPLY_PANEL = '300000000000000092';
+  const REVIEW = '300000000000000093';
+  const COUNTER = '300000000000000094';
+  const ROUTED = '300000000000000095';
+
+  function withFeatures(features: Partial<typeof configured.features>, patch: Partial<typeof configured> = {}) {
+    return { ...configured, ...patch, features: { ...configured.features, ...features } };
+  }
+
+  it('checks the notification role: missing, above the bot, elevated, not mentionable, conflicting', () => {
+    const notify = { ...configured.features.notifyRole, roleId: NOTIFY_ROLE, panelChannelId: PANEL };
+    const channels = new Map([...facts().channels, [PANEL, channelFact(PANEL)]]);
+    expect(codes(diagnoseGuild(facts({ channels }), withFeatures({ notifyRole: notify })))).toEqual(['notify_role_not_found']);
+
+    const roles = new Map([...facts().roles, [NOTIFY_ROLE, roleFact(NOTIFY_ROLE, 30, { name: 'Alerts', elevated: true, mentionable: false })]]);
+    const result = diagnoseGuild(facts({ roles, channels }), withFeatures({ notifyRole: notify }));
+    expect(codes(result)).toEqual(['notify_role_above_bot', 'notify_role_elevated', 'notify_role_not_mentionable']);
+    expect(result.problems.find((p) => p.code === 'notify_role_not_mentionable')!.level).toBe('warn');
+
+    // Mentionable check is skipped when the role pings nobody or the bot can mention everyone.
+    const quiet = { ...notify, pingOnLive: false, pingOnContent: false };
+    const okRoles = new Map([...facts().roles, [NOTIFY_ROLE, roleFact(NOTIFY_ROLE, 3, { mentionable: false })]]);
+    expect(codes(diagnoseGuild(facts({ roles: okRoles, channels }), withFeatures({ notifyRole: quiet })))).toEqual([]);
+    const canMention = facts({ roles: okRoles, channels, bot: { hasManageRoles: true, hasMentionEveryone: true, highestRole: BOT_ROLE } });
+    expect(codes(diagnoseGuild(canMention, withFeatures({ notifyRole: notify })))).toEqual([]);
+
+    const conflict = withFeatures({ notifyRole: { ...notify, roleId: LIVE_ROLE } });
+    expect(codes(diagnoseGuild(facts({ channels }), conflict))).toEqual(['notify_role_conflict']);
+  });
+
+  it('checks the notify panel channel', () => {
+    const roles = new Map([...facts().roles, [NOTIFY_ROLE, roleFact(NOTIFY_ROLE, 3)]]);
+    const notify = { ...configured.features.notifyRole, roleId: NOTIFY_ROLE };
+    expect(codes(diagnoseGuild(facts({ roles }), withFeatures({ notifyRole: notify })))).toEqual(['notify_panel_channel_unset']);
+    const channels = new Map([...facts().channels, [PANEL, channelFact(PANEL, { missing: ['SendMessages'] })]]);
+    const result = diagnoseGuild(facts({ roles, channels }), withFeatures({ notifyRole: { ...notify, panelChannelId: PANEL } }));
+    expect(result.problems.map((p) => [p.code, p.level])).toEqual([['notify_panel_channel_no_permission', 'warn']]);
+  });
+
+  it('checks every routed channel once (and not the defaults twice)', () => {
+    const routing = { liveByPlatform: { kick: ROUTED }, contentByPlatform: { tiktok: LIVE_CHANNEL }, contentByKind: { clip: ROUTED } };
+    const missing = diagnoseGuild(facts(), withFeatures({ routing }));
+    expect(codes(missing)).toEqual(['routed_channel_not_found']);
+    expect(missing.problems[0]!.level).toBe('error');
+    const channels = new Map([...facts().channels, [ROUTED, channelFact(ROUTED, { canAttachFiles: false })]]);
+    expect(codes(diagnoseGuild(facts({ channels }), withFeatures({ routing })))).toEqual(['routed_channel_no_attach_files']);
+    // The digest channel is a routed channel too.
+    const clips = { ...configured.features.clips, digestChannelId: ROUTED };
+    expect(codes(diagnoseGuild(facts(), withFeatures({ clips })))).toEqual(['routed_channel_not_found']);
+  });
+
+  it('checks the application channels only when applications are enabled', () => {
+    const applications = { ...configured.features.applications, enabled: true };
+    expect(codes(diagnoseGuild(facts(), withFeatures({ applications })))).toEqual(['apply_panel_channel_unset']);
+    const full = { ...applications, panelChannelId: APPLY_PANEL, reviewChannelId: REVIEW };
+    const channels = new Map([...facts().channels, [APPLY_PANEL, channelFact(APPLY_PANEL)], [REVIEW, channelFact(REVIEW, { textBased: false })]]);
+    expect(codes(diagnoseGuild(facts({ channels }), withFeatures({ applications: full })))).toEqual(['review_channel_not_text']);
+    expect(codes(diagnoseGuild(facts(), withFeatures({ applications: { ...full, enabled: false } })))).toEqual([]);
+  });
+
+  it('checks that the counter channel can be renamed', () => {
+    const counter = { ...configured.features.counter, channelId: COUNTER };
+    expect(codes(diagnoseGuild(facts(), withFeatures({ counter })))).toEqual(['counter_channel_not_found']);
+    const voice = new Map([...facts().channels, [COUNTER, channelFact(COUNTER, { textBased: false, manageMissing: ['ManageChannels', 'Connect'] })]]);
+    const result = diagnoseGuild(facts({ channels: voice }), withFeatures({ counter }));
+    expect(codes(result)).toEqual(['counter_channel_no_permission']);
+    expect(result.problems[0]!.message).toContain('إدارة الروم (Manage Channel)، الاتصال (Connect)');
+    const ok = new Map([...facts().channels, [COUNTER, channelFact(COUNTER, { textBased: false, manageMissing: [] })]]);
+    expect(codes(diagnoseGuild(facts({ channels: ok }), withFeatures({ counter })))).toEqual([]);
+    const thread = new Map([...facts().channels, [COUNTER, channelFact(COUNTER, { thread: true })]]);
+    expect(codes(diagnoseGuild(facts({ channels: thread }), withFeatures({ counter })))).toEqual(['counter_channel_thread']);
+  });
+
+  it('warns when presence detection is on without the Presence intent', () => {
+    const presence = { ...configured.features.presence, enabled: true };
+    expect(codes(diagnoseGuild(facts({ presenceIntent: false }), withFeatures({ presence })))).toEqual(['presence_intent_missing']);
+    expect(codes(diagnoseGuild(facts({ presenceIntent: true }), withFeatures({ presence })))).toEqual([]);
+    expect(codes(diagnoseGuild(facts({ presenceIntent: false }), configured))).toEqual([]);
+  });
+
+  it('speaks the guild language', () => {
+    const english = withFeatures({ language: 'en' });
+    const fresh = diagnoseGuild(facts(), { ...settings(), features: { ...settings().features, language: 'en' } });
+    expect(fresh.problems.map((p) => p.message)).toEqual([
+      'The Streamer role is not set — choose it in the settings so the bot can assign it automatically',
+      'The Streaming Now role is not set — choose it in the settings so the bot can assign it automatically',
+      'No live notification channel is set — the bot will not post live notifications',
+      'No content notification channel is set — the bot will not post new content',
+    ]);
+    const perms = diagnoseGuild(facts({ channels: new Map([[LIVE_CHANNEL, channelFact(LIVE_CHANNEL, { name: 'live', missing: ['SendMessages', 'EmbedLinks'] })]]) }), english);
+    expect(perms.problems[0]!.message).toBe('The bot cannot post in the live notification channel (#live) — missing: Send Messages, Embed Links');
+    const above = diagnoseGuild(facts({ roles: new Map([[LIVE_ROLE, roleFact(LIVE_ROLE, 25, { name: 'Streaming Now' })]]) }), english);
+    expect(above.problems.find((p) => p.code === 'live_role_above_bot')!.message).toContain('The bot role must be above Streaming Now');
+    expect(diagnoseGuild(facts({ ready: false }), english).problems[0]!.message).toContain('The bot is not connected to Discord');
+  });
+
+  it('still works with settings that predate the features column', () => {
+    const legacy = { ...configured } as Partial<typeof configured>;
+    delete legacy.features;
+    expect(codes(diagnoseGuild(facts(), legacy as typeof configured))).toEqual([]);
+  });
+});

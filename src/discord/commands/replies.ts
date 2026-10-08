@@ -1,9 +1,11 @@
-/** Reply helpers shared by the slash commands: consistent Arabic embeds and safe (silent) replies. */
+/** Reply helpers shared by the slash commands: consistent embeds (guild language) and safe (silent) replies. */
 import type { APIEmbed, InteractionEditReplyOptions, InteractionReplyOptions } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { ValidationError } from '../../core/errors.js';
 import { childLogger } from '../../core/logger.js';
+import type { Language } from '../../db/models.js';
 import { describeDiscordError } from '../apiErrors.js';
+import { ti } from '../i18n/interactions.js';
 import { truncate } from '../format.js';
 import { silentMentions } from '../mentions.js';
 import type { LinkButtonRow } from '../messages.js';
@@ -27,16 +29,18 @@ export function embed(color: number, title: string, description?: string): APIEm
 }
 
 export const successEmbed = (title: string, description?: string) => embed(COLORS.success, `✅ ${title}`, description);
-export const errorEmbed = (description: string) => embed(COLORS.error, '⚠️ ما تمت العملية', description);
+export const errorEmbed = (description: string, lang: Language = 'ar') => embed(COLORS.error, ti(lang, 'common.failed.title'), description);
 
 const ARABIC_RE = /[؀-ۿ]/;
-const GENERIC_ERROR = 'صار خطأ غير متوقع، جرّب بعد شوي. لو تكررت المشكلة راجع سجل البوت في لوحة التحكم';
 
-/** User-facing text for an error: validation and Arabic messages are shown as-is, anything else is generic. */
-export function friendlyError(err: unknown): string {
+/**
+ * User-facing text for an error: validation errors (written for users by the services) and Arabic messages are
+ * shown as-is, anything else (internal errors) becomes a generic message in the guild language.
+ */
+export function friendlyError(err: unknown, lang: Language = 'ar'): string {
   if (err instanceof ValidationError) return err.message;
   if (err instanceof Error && ARABIC_RE.test(err.message)) return err.message;
-  return GENERIC_ERROR;
+  return ti(lang, 'common.genericError');
 }
 
 export interface ReplyPayload {
@@ -71,7 +75,7 @@ export async function respond(interaction: GuildCommandInteraction, payload: Rep
   }
 }
 
-export async function respondError(interaction: GuildCommandInteraction, err: unknown): Promise<void> {
+export async function respondError(interaction: GuildCommandInteraction, err: unknown, lang: Language = 'ar'): Promise<void> {
   if (!(err instanceof ValidationError)) log.error({ err, command: interaction.commandName }, 'Slash command failed');
-  await respond(interaction, { embeds: [errorEmbed(friendlyError(err))] });
+  await respond(interaction, { embeds: [errorEmbed(friendlyError(err, lang), lang)] });
 }

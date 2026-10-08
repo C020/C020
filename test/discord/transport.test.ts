@@ -1,4 +1,4 @@
-import { ChannelType, PermissionFlagsBits } from 'discord.js';
+import { ChannelType, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import { DiscordLookups } from '../../src/discord/gateway.js';
 import { silentMentions } from '../../src/discord/mentions.js';
@@ -102,6 +102,18 @@ describe('DiscordTransport', () => {
     channel.editError = Object.assign(new Error('Unknown Message'), { code: 10008 });
     expect(await transport.edit(GUILD, { channelId: CHANNEL, messageId: '900000000000000005' }, message())).toMatchObject({ ok: false, reason: 'gone' });
     expect(await transport.edit(GUILD, { channelId: CHANNEL, messageId: 'x' }, message())).toMatchObject({ ok: false, reason: 'gone' });
+  });
+
+  it('sends silent messages with SuppressNotifications, but never passes flags on edits (#10)', async () => {
+    const { transport, channel } = setup();
+    const silent: OutgoingMessage = { ...message('x'), silent: true };
+    expect(await transport.send(GUILD, CHANNEL, silent)).toMatchObject({ ok: true });
+    expect(channel.sent[0]!.flags).toBe(MessageFlags.SuppressNotifications);
+    expect(MessageFlags.SuppressNotifications).toBe(4096);
+    await transport.send(GUILD, CHANNEL, message('y'));
+    expect('flags' in channel.sent[1]!).toBe(false);
+    await transport.edit(GUILD, { channelId: CHANNEL, messageId: '900000000000000005' }, silent);
+    expect('flags' in channel.edits[0]!.payload).toBe(false);
   });
 
   it('is not ready without a connected client', async () => {

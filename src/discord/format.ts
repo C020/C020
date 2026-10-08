@@ -1,7 +1,8 @@
 /**
- * Pure text helpers for Discord output: number/duration formatting (western digits, Arabic units),
+ * Pure text helpers for Discord output: number/duration formatting (western digits, Arabic or English units),
  * Discord timestamps, markdown escaping of untrusted text, limit-aware truncation and URL sanitizing.
  */
+import type { Language } from '../db/features.js';
 
 const NUMBER_FORMAT = new Intl.NumberFormat('en-US');
 
@@ -14,14 +15,23 @@ function wholeSeconds(totalSec: number): number {
   return Number.isFinite(totalSec) ? Math.max(0, Math.round(totalSec)) : 0;
 }
 
-/** Compact duration such as "2س 15د", "45د" or "3س". Streams longer than a day stay in hours ("26س 10د"). */
-export function formatDurationShort(totalSec: number): string {
+const DURATION_UNITS: Record<Language, { h: string; m: string; underMinute: string }> = {
+  ar: { h: 'س', m: 'د', underMinute: 'أقل من دقيقة' },
+  en: { h: 'h', m: 'm', underMinute: 'under a minute' },
+};
+
+/**
+ * Compact duration such as "2س 15د", "45د" or "3س" (English: "2h 15m", "45m", "3h"). Streams longer than a day
+ * stay in hours ("26س 10د").
+ */
+export function formatDurationShort(totalSec: number, lang: Language = 'ar'): string {
+  const units = DURATION_UNITS[lang] ?? DURATION_UNITS.ar;
   const sec = wholeSeconds(totalSec);
   const hours = Math.floor(sec / 3600);
   const minutes = Math.floor((sec % 3600) / 60);
-  if (hours === 0 && minutes === 0) return 'أقل من دقيقة';
-  if (hours === 0) return `${minutes}د`;
-  return minutes === 0 ? `${hours}س` : `${hours}س ${minutes}د`;
+  if (hours === 0 && minutes === 0) return units.underMinute;
+  if (hours === 0) return `${minutes}${units.m}`;
+  return minutes === 0 ? `${hours}${units.h}` : `${hours}${units.h} ${minutes}${units.m}`;
 }
 
 /** Video length as a clock: "4:05", "1:02:03". */
@@ -99,6 +109,17 @@ export function safeUrl(value: string | null | undefined, maxLength = 2048): str
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   const href = url.href;
   return href.length <= maxLength ? href : null;
+}
+
+/**
+ * Markdown masked link "[text](url)" with escaped text. Parentheses in the URL are percent-encoded so a URL such
+ * as ".../clip_(1)" cannot end the link early. Falls back to the escaped text when the URL is unusable.
+ */
+export function maskedLink(text: string | null | undefined, url: string | null | undefined): string {
+  const label = escapeMarkdown(text);
+  const safe = safeUrl(url);
+  if (!safe || !label) return label;
+  return `[${label}](${safe.replace(/\(/g, '%28').replace(/\)/g, '%29')})`;
 }
 
 /** Arabic list join: "أ، ب و ج". */

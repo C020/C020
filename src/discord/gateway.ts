@@ -6,7 +6,7 @@
 import type { Client, Guild, GuildBasedChannel, GuildMember } from 'discord.js';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { childLogger } from '../core/logger.js';
-import type { GuildSettings } from '../db/models.js';
+import type { GuildSettings, Language } from '../db/models.js';
 import type {
   DiscordChannelInfo,
   DiscordGateway,
@@ -16,8 +16,17 @@ import type {
   GuildDiagnostics,
 } from '../services/ports.js';
 import { classifyDiscordError, describeDiscordError } from './apiErrors.js';
-import { type ChannelFact, diagnoseGuild, type GuildFacts, type RoleFact } from './diagnostics.js';
-import { isAssignable, isElevatedPermissions, missingPostingPermissions, type RolePosition } from './permissions.js';
+import { type ChannelFact, diagnosedChannelIds, diagnoseGuild, type GuildFacts, type RoleFact } from './diagnostics.js';
+import { guildLanguage, ti } from './i18n/interactions.js';
+import type { RoleCheck } from './interactions/panels.js';
+import {
+  decideRoleAssignability,
+  isAssignable,
+  isElevatedPermissions,
+  missingManageChannelPermissions,
+  missingPostingPermissions,
+  type RolePosition,
+} from './permissions.js';
 import { isSnowflake } from './util.js';
 
 const log = childLogger('discord.gateway');
@@ -26,7 +35,11 @@ export interface GatewayDeps {
   getClient: () => Client | null;
   /** Last known result of a full member fetch per guild (members intent health). */
   membersIntentOk: (guildId: string) => boolean | null;
+  /** #15 — whether the client logged in with the Presence intent (diagnostics); omitted = unknown. */
+  presenceIntent?: () => boolean;
 }
+
+const VOICE_TYPES: ReadonlySet<ChannelType> = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
 
 function guildInfo(guild: Guild): DiscordGuildInfo {
   return { id: guild.id, name: guild.name, iconUrl: guild.iconURL({ size: 128 }), memberCount: guild.memberCount };
@@ -148,9 +161,43 @@ export class DiscordLookups implements DiscordGateway {
         guildId,
         botInGuild: this.guild(guildId) !== null,
         botHasManageRoles: false,
-        problems: [{ code: 'diagnostics_failed', level: 'warn', message: 'ما قدرنا نفحص إعدادات السيرفر الحين، جرّب بعد شوي' }],
+        problems: [{ code: 'diagnostics_failed', level: 'warn', message: ti(guildLanguage(settings), 'diag.failed') }],
       };
     }
+  }
+
+  /**
+   * Can the bot hand out this role (exists, not managed, below the bot, Manage Roles) and does it carry
+   * moderation power? null when Discord is not ready or the bot is not in the guild (unknown).
+   */
+  async checkRole(guildId: string, roleId: string, lang: Language = 'ar'): Promise<RoleCheck | null> {
+    const guild = this.readyClient()?.guilds.cache.get(guildId);
+    if (!guild) return null;
+    if (!isSnowflake(roleId)) return { exists: false };
+    let role = guild.roles.cache.get(roleId) ?? null;
+    if (!role) {
+      try {
+        role = await guild.roles.fetch(roleId);
+      } catch (err) {
+        if (classifyDiscordError(err) !== 'unknown_role') return null;
+      }
+    }
+    if (!role) return { exists: false };
+    const me = await this.me(guild);
+    if (!me) return null;
+    return {
+      exists: true,
+      name: role.name,
+      elevated: isElevatedPermissions(role.permissions?.bitfield ?? 0n),
+      decision: decideRoleAssignability(
+        {
+          guildId: guild.id,
+          role: { id: role.id, name: role.name, position: role.position, managed: role.managed },
+          bot: { hasManageRoles: me.permissions.has(PermissionFlagsBits.ManageRoles), highestRole: botHighestRole(me, guild.id) },
+        },
+        lang,
+      ),
+    };
   }
 
   /** Streamer avatar from the cache only (no REST call on hot paths). */
@@ -176,6 +223,7 @@ export class DiscordLookups implements DiscordGateway {
       roles: new Map(),
       channels: new Map(),
       membersIntentOk: this.deps.membersIntentOk(guildId),
+      presenceIntent: this.deps.presenceIntent?.(),
     };
     const guild = client?.guilds.cache.get(guildId);
     if (!guild) return base;
@@ -183,23 +231,36 @@ export class DiscordLookups implements DiscordGateway {
     const me = await this.me(guild);
     const roles = new Map<string, RoleFact>();
     for (const role of guild.roles.cache.values()) {
-      roles.set(role.id, { id: role.id, name: role.name, position: role.position, managed: role.managed, mentionable: role.mentionable });
+      roles.set(role.id, {
+        id: role.id,
+        name: role.name,
+        position: role.position,
+        managed: role.managed,
+        mentionable: role.mentionable,
+        elevated: isElevatedPermissions(role.permissions?.bitfield ?? 0n),
+      });
     }
 
     const channels = new Map<string, ChannelFact>();
-    for (const channelId of new Set([settings.liveChannelId, settings.contentChannelId, settings.logChannelId])) {
-      if (!channelId || !isSnowflake(channelId)) continue;
+    const counterId = settings.features?.counter.channelId ?? null;
+    for (const channelId of diagnosedChannelIds(settings)) {
+      if (!isSnowflake(channelId)) continue;
       const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId).catch(() => null));
       if (!channel) continue;
       const textBased = channel.isTextBased() && channel.isSendable();
       const perms = me ? channel.permissionsFor(me) : null;
-      channels.set(channelId, {
+      const fact: ChannelFact = {
         id: channelId,
         name: channel.name,
         textBased,
         missing: textBased && perms ? missingPostingPermissions((flag) => perms.has(flag), channel.isThread()) : [],
         canAttachFiles: textBased && perms ? perms.has(PermissionFlagsBits.AttachFiles) : undefined,
-      });
+        thread: channel.isThread(),
+      };
+      if (channelId === counterId && perms) {
+        fact.manageMissing = missingManageChannelPermissions((flag) => perms.has(flag), VOICE_TYPES.has(channel.type));
+      }
+      channels.set(channelId, fact);
     }
 
     return {

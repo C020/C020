@@ -1,5 +1,6 @@
 /**
- * Message templates: Arabic defaults, `{variable}` rendering and Discord limits. Pure, no Discord imports.
+ * Message templates: built-in defaults (Arabic / English), `{variable}` rendering, layering and Discord limits.
+ * Pure, no Discord imports.
  *
  * Rendering rules
  * - `{key}` is replaced by the variable value (keys are case-insensitive); unknown keys render empty.
@@ -7,12 +8,19 @@
  *   disappear instead of leaving a dangling label.
  * - Three or more consecutive newlines collapse to a blank line; the result is trimmed.
  */
-import type { Templates, TemplateSpec } from '../db/models.js';
+import type { Language, Templates, TemplateSpec } from '../db/models.js';
 import { formatNumber, truncate } from './format.js';
 
-import { DEFAULT_TEMPLATES, type ResolvedTemplate, type TemplateType } from '../shared/templates.js';
+import {
+  DEFAULT_TEMPLATES,
+  DEFAULT_TEMPLATES_BY_LANG,
+  DEFAULT_TEMPLATES_EN,
+  defaultTemplatesFor,
+  type ResolvedTemplate,
+  type TemplateType,
+} from '../shared/templates.js';
 
-export { DEFAULT_TEMPLATES };
+export { DEFAULT_TEMPLATES, DEFAULT_TEMPLATES_BY_LANG, DEFAULT_TEMPLATES_EN, defaultTemplatesFor };
 export type { ResolvedTemplate, TemplateType };
 
 export const DISCORD_LIMITS = {
@@ -69,27 +77,43 @@ function validColor(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffffff ? value : null;
 }
 
+/** Extra layers below the preview override (#5 streamer templates, #16 language of the defaults). */
+export interface TemplateLayers {
+  /** The streamer's own overrides (field by field over the guild template). */
+  streamer?: Templates | null;
+  /** Language of the built-in defaults (Arabic when omitted). */
+  language?: Language | null;
+}
+
+type TextKey = 'content' | 'title' | 'description' | 'footer';
+
 /**
- * Effective template for a type: each field comes from `override` (dashboard editor preview), else the
- * guild's saved template, else the default. An explicit empty string means "leave this part empty".
+ * Effective template for a type. Each text field comes from the first layer that defines it:
+ *   `override` (dashboard editor preview) → streamer template (#5) → guild template → default (guild language).
+ * A string — even an empty one, meaning "leave this part empty" — defines the field; undefined inherits.
+ *
+ * Color: an override that has a `color` key decides it (null clears every template color, like saving the editor
+ * without a color does). Otherwise a valid streamer template color, else the guild template color. null means
+ * "no template color": the builders then use the streamer color, then the platform color.
  */
-export function resolveTemplate(type: TemplateType, templates: Templates | null | undefined, override?: TemplateSpec): ResolvedTemplate {
+export function resolveTemplate(type: TemplateType, templates: Templates | null | undefined, override?: TemplateSpec, layers: TemplateLayers = {}): ResolvedTemplate {
   const saved = templates?.[type];
-  const def = DEFAULT_TEMPLATES[type];
-  const pick = (key: 'content' | 'title' | 'description' | 'footer'): string => {
-    const fromOverride = override?.[key];
-    if (typeof fromOverride === 'string') return fromOverride;
-    const fromSaved = saved?.[key];
-    if (typeof fromSaved === 'string') return fromSaved;
+  const personal = layers.streamer?.[type];
+  const def = defaultTemplatesFor(layers.language)[type];
+  const pick = (key: TextKey): string => {
+    for (const layer of [override, personal, saved]) {
+      const value = layer?.[key];
+      if (typeof value === 'string') return value;
+    }
     return def[key];
   };
-  const color = override && 'color' in override ? override.color : saved?.color;
+  const color = override && 'color' in override ? validColor(override.color) : (validColor(personal?.color) ?? validColor(saved?.color));
   return {
     content: pick('content'),
     title: pick('title'),
     description: pick('description'),
     footer: pick('footer'),
-    color: validColor(color),
+    color,
   };
 }
 

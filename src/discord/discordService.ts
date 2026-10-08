@@ -1,14 +1,16 @@
 /**
  * DiscordService — the bot's Discord layer (DiscordApi): gateway lifecycle, notifications, roles,
- * dashboard lookups/diagnostics, previews and slash commands.
+ * dashboard lookups/diagnostics, previews, slash commands, buttons/modals and the v2 Discord actions.
  *
- * Gateway intents: Guilds + GuildMembers. GuildMembers is PRIVILEGED: enable "SERVER MEMBERS INTENT" in
- * the Discord Developer Portal (Bot → Privileged Gateway Intents) or login fails with a clear error. It is
+ * Gateway intents: Guilds + GuildMembers, plus GuildPresences when DISCORD_PRESENCE_INTENT=true (#15).
+ * GuildMembers and GuildPresences are PRIVILEGED: enable "SERVER MEMBERS INTENT" (and "PRESENCE INTENT" for #15)
+ * in the Discord Developer Portal (Bot → Privileged Gateway Intents) or login fails with a clear error. Members are
  * needed to list members for role reconciliation and to restore roles when a streamer rejoins the server.
  *
  * Composition: DiscordTransport (send/edit I/O) → DiscordNotifier (notification policy), DiscordRoles
- * (role changes, serialized per guild), DiscordLookups (read-only lookups + diagnostics) and the slash
- * command dispatcher. Every piece reads the current client through `getClient`, so nothing holds a stale
+ * (role changes, serialized per guild), DiscordLookups (read-only lookups + diagnostics), PanelPublisher
+ * (interactive panels), DiscordActionsImpl (renames, DMs, review messages, presences) and the slash command /
+ * component dispatchers. Every piece reads the current client through `getClient`, so nothing holds a stale
  * reference across restarts.
  */
 import {
@@ -24,16 +26,17 @@ import {
   Options,
   type Role,
 } from 'discord.js';
+import type { DiscordApi, DiscordServices, StreamingActivity } from '../app/context.js';
 import type { AppConfig } from '../config.js';
-import type { DiscordApi, SessionServiceApi, StreamerServiceApi } from '../app/context.js';
 import { ValidationError } from '../core/errors.js';
 import type { AppEvents } from '../core/events.js';
 import { childLogger } from '../core/logger.js';
-import type { AuditLevel, GuildSettings, TemplateSpec } from '../db/models.js';
+import type { AuditLevel, GuildSettings, PanelKind, Streamer, StreamerApplication, TemplateSpec } from '../db/models.js';
 import type { Repositories } from '../db/repositories.js';
 import type { AuditService } from '../services/audit.js';
 import type {
   ContentView,
+  DigestView,
   DiscordChannelInfo,
   DiscordGuildInfo,
   DiscordMemberInfo,
@@ -42,24 +45,33 @@ import type {
   GuildDiagnostics,
   LiveView,
   MessageRef,
+  PresenceLiveView,
+  RenameOutcome,
   RoleChangeOutcome,
   SummaryOutcome,
   SummaryView,
 } from '../services/ports.js';
+import { allNotificationChannelIds, resolveContentChannelId, resolveLiveChannelId } from '../services/routing.js';
 import type { MessagePreview } from '../shared/api.js';
-import { describeDiscordError } from './apiErrors.js';
-import { type CommandEnv, type CommandServices, commandDefinitions, dispatchCommand } from './commands/index.js';
+import { describeDiscordError, shouldRejectRateLimit } from './apiErrors.js';
+import { type CommandEnv, commandDefinitions, dispatchCommand } from './commands/index.js';
 import { DEFAULT_PLATFORM_EMOJIS, hasCustomEmojis, type PlatformEmojis, resolvePlatformEmojis } from './emojis.js';
 import { DiscordLookups } from './gateway.js';
-import { buildPing } from './mentions.js';
-import { applyPing, buildMessage, toPreview } from './messages.js';
-import { asTestMessage, DiscordNotifier, failureMessageAr } from './notifier.js';
+import { guildLanguage, ti } from './i18n/interactions.js';
+import { DiscordActionsImpl } from './interactions/actions.js';
+import { dispatchComponent, isOwnComponent } from './interactions/dispatch.js';
+import { DiscordInteractiveMessenger } from './interactions/messenger.js';
+import { PanelPublisher } from './interactions/panels.js';
+import { PresenceTracker } from './interactions/presence.js';
+import type { ComponentInteraction, InteractionEnv } from './interactions/types.js';
+import { buildMessage, buildPreviewMessage } from './messages.js';
+import { asTestMessage, DiscordNotifier, failureMessage } from './notifier.js';
 import { buildInviteUrl } from './permissions.js';
 import { DiscordRoles } from './roles.js';
-import { SAMPLE_AVATAR, type SampleIdentity, sampleView } from './samples.js';
+import { sampleIdentityFor, sampleView } from './samples.js';
 import type { TemplateType } from './templates.js';
 import { DiscordTransport } from './transport.js';
-import { TimeoutError, WarnThrottle, withTimeout } from './util.js';
+import { KeyedQueue, TimeoutError, WarnThrottle, withTimeout } from './util.js';
 
 const log = childLogger('discord');
 
@@ -81,7 +93,6 @@ const MEMBER_WARMUP_RETRY_MS = 10 * 60_000;
 /** Shard resume/ready events arriving close together trigger one recovery pass. */
 const GATEWAY_RECOVERY_DEBOUNCE_MS = 5_000;
 
-/** Turns gateway login failures into actionable operator messages (logs are English). */
 /** Startup failure; `permanent` errors (bad token, missing intent) won't fix themselves by retrying. */
 export class DiscordStartupError extends Error {
   constructor(
@@ -94,7 +105,8 @@ export class DiscordStartupError extends Error {
   }
 }
 
-export function startupError(err: unknown, timeoutMs: number): DiscordStartupError {
+/** Turns gateway login failures into actionable operator messages (logs are English). */
+export function startupError(err: unknown, timeoutMs: number, presenceIntent = false): DiscordStartupError {
   const code = (err as { code?: unknown })?.code;
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof TimeoutError) {
@@ -106,8 +118,10 @@ export function startupError(err: unknown, timeoutMs: number): DiscordStartupErr
     return new DiscordStartupError('DISCORD_TOKEN is invalid. Copy the bot token again from Discord Developer Portal → Bot → Reset Token.', true, { cause: err });
   }
   if (code === 'DisallowedIntents' || code === 4014 || /disallowed intent|privileged intent/i.test(message)) {
+    const intents = presenceIntent ? 'SERVER MEMBERS INTENT and PRESENCE INTENT' : 'SERVER MEMBERS INTENT';
+    const hint = presenceIntent ? ' (or set DISCORD_PRESENCE_INTENT=false to run without Discord streaming detection)' : '';
     return new DiscordStartupError(
-      'The privileged "Server Members Intent" is not enabled. Enable it in Discord Developer Portal → Bot → Privileged Gateway Intents → SERVER MEMBERS INTENT, then restart the bot.',
+      `A privileged gateway intent is not enabled. Enable ${intents} in Discord Developer Portal → Bot → Privileged Gateway Intents, then restart the bot${hint}.`,
       true,
       { cause: err },
     );
@@ -120,11 +134,15 @@ export class DiscordService implements DiscordApi {
   private readonly repos: Repositories;
   private readonly audit: AuditService;
   private readonly readyTimeoutMs: number;
+  /** #15 — log in with the privileged GuildPresences intent. */
+  private readonly presenceIntent: boolean;
 
   private client: Client | null = null;
   private starting: Promise<void> | null = null;
   private emojis: PlatformEmojis = DEFAULT_PLATFORM_EMOJIS;
+  private services: DiscordServices | null = null;
   private commandEnv: CommandEnv | null = null;
+  private interactionEnv: InteractionEnv | null = null;
   private readonly membersIntent = new Map<string, boolean>();
   private readonly memberWarmups = new Map<string, number>();
   private readonly startedAt = Date.now();
@@ -133,21 +151,32 @@ export class DiscordService implements DiscordApi {
   private recoveryTimer: NodeJS.Timeout | null = null;
   /** Set once the first READY of the current client arrived (later shard READY events are reconnects). */
   private initialReady = false;
+  /** Presence changes are forwarded in order per member. */
+  private readonly presenceQueue = new KeyedQueue();
 
   private readonly notifier: DiscordNotifier;
   private readonly roleManager: DiscordRoles;
   private readonly lookups: DiscordLookups;
+  private readonly presences = new PresenceTracker();
+  private readonly actions: DiscordActionsImpl;
+  private readonly panels: PanelPublisher;
 
   constructor(deps: DiscordServiceDeps, options: DiscordServiceOptions = {}) {
     this.config = deps.config;
     this.repos = deps.repos;
     this.audit = deps.audit;
     this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+    this.presenceIntent = deps.config.DISCORD_PRESENCE_INTENT === true;
 
     const getClient = () => this.client;
-    this.lookups = new DiscordLookups({ getClient, membersIntentOk: (guildId) => this.membersIntent.get(guildId) ?? null });
+    this.lookups = new DiscordLookups({
+      getClient,
+      membersIntentOk: (guildId) => this.membersIntent.get(guildId) ?? null,
+      presenceIntent: () => this.presenceIntent,
+    });
+    const transport = new DiscordTransport(getClient);
     this.notifier = new DiscordNotifier({
-      transport: new DiscordTransport(getClient),
+      transport,
       repos: this.repos,
       audit: this.audit,
       emojis: () => this.emojis,
@@ -164,6 +193,23 @@ export class DiscordService implements DiscordApi {
       audit: this.audit,
       warnThrottle: this.throttle,
       onMembersFetch: (guildId, ok) => this.membersIntent.set(guildId, ok),
+    });
+    const messenger = new DiscordInteractiveMessenger(getClient, transport);
+    this.actions = new DiscordActionsImpl({
+      getClient,
+      repos: this.repos,
+      audit: this.audit,
+      messenger,
+      presences: this.presences,
+      presenceIntent: () => this.presenceIntent,
+      emojis: () => this.emojis,
+      warnThrottle: this.throttle,
+    });
+    this.panels = new PanelPublisher({
+      repos: this.repos,
+      messenger,
+      isReady: () => this.isReady(),
+      checkRole: (guildId, roleId, lang) => this.lookups.checkRole(guildId, roleId, lang),
     });
   }
 
@@ -183,32 +229,47 @@ export class DiscordService implements DiscordApi {
     await withTimeout(this.notifier.close(), SHUTDOWN_FLUSH_MS, 'log flush timed out').catch(() => {});
     const client = this.client;
     this.client = null;
+    this.presences.clear();
     if (client) {
       await client.destroy().catch((err) => log.warn({ err }, 'Destroying Discord client failed'));
       log.info('Discord client stopped');
     }
   }
 
-  attachServices(services: { streamers: StreamerServiceApi; sessions: SessionServiceApi; repos: Repositories; audit: AuditService }): void {
-    const commandServices: CommandServices = services;
+  /** Gives slash commands and buttons/modals access to the services (v2 services are optional). */
+  attachServices(services: DiscordServices): void {
+    this.services = services;
     this.commandEnv = {
-      services: commandServices,
+      services,
       gateway: this.lookups,
       sendTest: (guildId, type) => this.sendTest(guildId, type),
+      postPanel: (guildId, kind) => this.postPanel(guildId, kind),
       messageUrl: (guildId, ref) => this.messageUrl(guildId, ref),
       emojis: () => this.emojis,
       wsPing: () => this.client?.ws.ping ?? -1,
       startedAt: this.startedAt,
       clock: Date.now,
     };
+    this.interactionEnv = {
+      services,
+      toggleRole: (guildId, userId, roleId, reason) => this.roleManager.toggleMemberRole(guildId, userId, roleId, reason),
+      upsertApplicationReview: (application, settings) => this.upsertApplicationReview(application, settings),
+      emojis: () => this.emojis,
+      clock: Date.now,
+    };
   }
 
   /**
    * Registers a callback for when the gateway comes back after a disconnect (shard resumed or re-identified).
-   * Role changes may have failed while it was away, so the wiring reconciles live roles from here.
+   * Role changes may have failed while it was away, so the wiring reconciles live roles (and presences) from here.
    */
   onGatewayRecovered(listener: () => void): void {
     this.recoveryListeners.push(listener);
+  }
+
+  /** #15 — the client logs in with the privileged Presence intent (DISCORD_PRESENCE_INTENT=true). */
+  presenceIntentEnabled(): boolean {
+    return this.presenceIntent;
   }
 
   private gatewayRecovered(shardId: number, how: 'resume' | 'ready'): void {
@@ -242,16 +303,19 @@ export class DiscordService implements DiscordApi {
       await withTimeout(Promise.all([client.login(this.config.DISCORD_TOKEN), ready]), this.readyTimeoutMs, 'Discord READY timeout');
     } catch (err) {
       this.client = null;
+      this.presences.clear();
       await client.destroy().catch(() => {});
-      throw startupError(err, this.readyTimeoutMs);
+      throw startupError(err, this.readyTimeoutMs, this.presenceIntent);
     }
-    log.info({ user: client.user?.tag, guilds: client.guilds.cache.size }, 'Discord client ready');
+    log.info({ user: client.user?.tag, guilds: client.guilds.cache.size, presenceIntent: this.presenceIntent }, 'Discord client ready');
     await Promise.allSettled([this.loadApplicationEmojis(client), this.registerCommands(client)]);
   }
 
   private createClient(): Client {
+    const intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers];
+    if (this.presenceIntent) intents.push(GatewayIntentBits.GuildPresences);
     const client = new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+      intents,
       // Safety net: anything sent without explicit allowedMentions pings nobody.
       allowedMentions: { parse: [], repliedUser: false },
       makeCache: Options.cacheWithLimits({
@@ -262,6 +326,7 @@ export class DiscordService implements DiscordApi {
         DMMessageManager: 0,
         ReactionManager: 0,
         ReactionUserManager: 0,
+        // Presences: only Streaming members are tracked, from raw packets (PresenceTracker).
         PresenceManager: 0,
         VoiceStateManager: 0,
         StageInstanceManager: 0,
@@ -272,7 +337,11 @@ export class DiscordService implements DiscordApi {
         AutoModerationRuleManager: 0,
         ThreadMemberManager: 0,
       }),
-      rest: { invalidRequestWarningInterval: 250 },
+      rest: {
+        invalidRequestWarningInterval: 250,
+        // Channel renames (#8 counter) report "rate limited" instead of blocking for up to 10 minutes.
+        rejectOnRateLimit: (data) => shouldRejectRateLimit(data),
+      },
     });
 
     client.on(Events.InteractionCreate, (interaction) => void this.onInteraction(interaction));
@@ -281,6 +350,7 @@ export class DiscordService implements DiscordApi {
     client.on(Events.GuildMemberAdd, (member) => void this.onMemberJoin(member));
     client.on(Events.GuildRoleDelete, (role) => this.onRoleDelete(role));
     client.on(Events.ChannelDelete, (channel) => this.onChannelDelete(channel));
+    if (this.presenceIntent) client.on(Events.Raw, (packet: unknown) => this.onRawPacket(packet));
     client.on(Events.Error, (err) => log.error({ err }, 'Discord client error'));
     client.on(Events.Warn, (message) => log.warn(message));
     client.on(Events.ShardDisconnect, (event, shardId) => log.warn({ shardId, code: event.code }, 'Discord gateway disconnected'));
@@ -341,11 +411,36 @@ export class DiscordService implements DiscordApi {
   // ───────────────────────────── gateway events ─────────────────────────────
 
   private async onInteraction(interaction: Interaction): Promise<void> {
-    if (!interaction.isChatInputCommand()) return;
     try {
-      await dispatchCommand(interaction, this.commandEnv);
+      if (interaction.isChatInputCommand()) {
+        await dispatchCommand(interaction, this.commandEnv);
+        return;
+      }
+      if ((interaction.isButton() || interaction.isModalSubmit()) && isOwnComponent(interaction.customId)) {
+        await dispatchComponent(interaction as unknown as ComponentInteraction, this.interactionEnv);
+      }
     } catch (err) {
-      log.error({ err, command: interaction.commandName }, 'Interaction handling failed');
+      log.error({ err, type: interaction.type }, 'Interaction handling failed');
+    }
+  }
+
+  /** #15 — raw gateway packets keep the Streaming presence map; real changes go to the presence service. */
+  private onRawPacket(packet: unknown): void {
+    let changes;
+    try {
+      changes = this.presences.handlePacket(packet as { t?: unknown; d?: unknown });
+    } catch (err) {
+      log.warn({ err }, 'Presence packet handling failed');
+      return;
+    }
+    if (changes.length === 0) return;
+    const presence = this.services?.presence;
+    if (!presence) return;
+    for (const change of changes) {
+      if (this.client?.users.cache.get(change.userId)?.bot) continue;
+      void this.presenceQueue
+        .run(`${change.guildId}:${change.userId}`, () => presence.onPresence(change.guildId, change.userId, change.activity))
+        .catch((err) => log.warn({ err, guildId: change.guildId, userId: change.userId }, 'Presence update handling failed'));
     }
   }
 
@@ -388,6 +483,7 @@ export class DiscordService implements DiscordApi {
         settings.streamerRoleId === role.id ? 'Streamer' : null,
         settings.liveRoleId === role.id ? 'Streaming Now' : null,
         settings.pingRoleId === role.id && settings.pingMode === 'role' ? 'المنشن' : null,
+        settings.features.notifyRole.roleId === role.id ? 'الإشعارات' : null,
       ].filter((u): u is string => u !== null);
       if (uses.length === 0) return;
       this.audit.record({
@@ -406,10 +502,17 @@ export class DiscordService implements DiscordApi {
     try {
       if (channel.isDMBased()) return;
       const settings = this.repos.settings.get(channel.guildId);
+      const f = settings.features;
+      const routed = allNotificationChannelIds(settings).filter((id) => id !== settings.liveChannelId && id !== settings.contentChannelId);
       const uses = [
         settings.liveChannelId === channel.id ? 'إشعارات البث' : null,
         settings.contentChannelId === channel.id ? 'إشعارات المقاطع' : null,
         settings.logChannelId === channel.id ? 'اللوق' : null,
+        routed.includes(channel.id) ? 'توجيه الإشعارات' : null,
+        f.notifyRole.panelChannelId === channel.id ? 'رسالة رتبة الإشعارات' : null,
+        f.applications.panelChannelId === channel.id ? 'رسالة التقديم' : null,
+        f.applications.reviewChannelId === channel.id ? 'مراجعة الطلبات' : null,
+        f.counter.channelId === channel.id ? 'العداد' : null,
       ].filter((u): u is string => u !== null);
       if (uses.length === 0) return;
       this.audit.record({
@@ -477,6 +580,18 @@ export class DiscordService implements DiscordApi {
     return this.notifier.postContent(view);
   }
 
+  postDigest(view: DigestView): Promise<MessageRef | null> {
+    return this.notifier.postDigest(view);
+  }
+
+  postPresenceLive(view: PresenceLiveView): Promise<MessageRef | null> {
+    return this.notifier.postPresenceLive(view);
+  }
+
+  endPresenceLive(ref: MessageRef, view: PresenceLiveView): Promise<boolean> {
+    return this.notifier.endPresenceLive(ref, view);
+  }
+
   log(guildId: string, level: AuditLevel, message: string): Promise<void> {
     return this.notifier.log(guildId, level, message);
   }
@@ -499,40 +614,71 @@ export class DiscordService implements DiscordApi {
     return this.roleManager.reconcile(guildId, liveUserIds, streamerUserIds);
   }
 
+  // ───────────────────────────── DiscordActions (v2) ─────────────────────────────
+
+  renameChannel(guildId: string, channelId: string, name: string): Promise<{ outcome: RenameOutcome; retryAfterMs?: number }> {
+    return this.actions.renameChannel(guildId, channelId, name);
+  }
+
+  sendDirectMessage(userId: string, message: { content: string; embedTitle?: string; embedDescription?: string; color?: number }): Promise<boolean> {
+    return this.actions.sendDirectMessage(userId, message);
+  }
+
+  upsertApplicationReview(application: StreamerApplication, settings: GuildSettings): Promise<MessageRef | null> {
+    return this.actions.upsertApplicationReview(application, settings);
+  }
+
+  streamingPresences(guildId: string): Promise<Map<string, StreamingActivity> | null> {
+    return this.actions.streamingPresences(guildId);
+  }
+
+  /** Posts or refreshes an interactive panel (#1 notify / #9 apply). Throws ValidationError in the guild language. */
+  postPanel(guildId: string, kind: PanelKind): Promise<MessageRef> {
+    return this.panels.post(guildId, kind);
+  }
+
   // ───────────────────────────── previews & tools ─────────────────────────────
 
-  async preview(guildId: string, type: TemplateType, template?: TemplateSpec): Promise<MessagePreview> {
+  async preview(guildId: string, type: TemplateType, template?: TemplateSpec, streamerId?: number): Promise<MessagePreview> {
     const settings = this.repos.settings.get(guildId);
-    const now = Date.now();
-    const identity = this.sampleIdentity();
-    // Unicode emojis: the dashboard renders text, it cannot show custom emoji markup.
-    const message = buildMessage(type, sampleView(type, settings, now, identity), {
-      emojis: DEFAULT_PLATFORM_EMOJIS,
-      avatarUrl: identity.avatarUrl,
+    const lang = guildLanguage(settings);
+    let streamer: Streamer | null = null;
+    if (streamerId !== undefined && streamerId !== null) {
+      streamer = this.repos.streamers.get(streamerId);
+      if (!streamer || streamer.guildId !== guildId) throw new ValidationError(ti(lang, 'preview.streamerMissing'), 'streamerId');
+    }
+    const avatarUrl = streamer ? this.lookups.avatarFor(guildId, streamer.discordUserId) : null;
+    // Unicode emojis (the default): the dashboard renders text, it cannot show custom emoji markup.
+    return buildPreviewMessage(settings, type, {
       template,
-      now,
+      streamer,
+      now: Date.now(),
+      identity: sampleIdentityFor(lang, this.botUser()?.id ?? ''),
+      ...(avatarUrl ? { avatarUrl } : {}),
     });
-    return toPreview(type === 'summary' ? message : applyPing(message, buildPing(settings)));
   }
 
   async sendTest(guildId: string, type: TemplateType): Promise<MessageRef | null> {
     const settings = this.repos.settings.get(guildId);
-    const channelId = type === 'content' ? settings.contentChannelId : settings.liveChannelId;
-    if (!channelId) {
-      throw new ValidationError(type === 'content' ? 'حدد روم إشعارات المقاطع أول من الإعدادات' : 'حدد روم إشعارات البث أول من الإعدادات', type === 'content' ? 'contentChannelId' : 'liveChannelId');
-    }
-    if (!this.isReady()) throw new ValidationError('البوت غير متصل بديسكورد حالياً، جرّب بعد شوي');
-
+    const lang = guildLanguage(settings);
     const now = Date.now();
-    const identity = this.sampleIdentity();
+    const identity = sampleIdentityFor(lang, this.botUser()?.id ?? '');
     const view = sampleView(type, settings, now, identity);
+    // The sample goes where a real post of that platform/kind would go (#4 routing).
+    const channelId =
+      type === 'content'
+        ? resolveContentChannelId(settings, (view as ContentView).channel.platform, (view as ContentView).item.kind)
+        : resolveLiveChannelId(settings, type === 'live' ? ((view as LiveView).platforms[0]?.platform ?? null) : ((view as SummaryView).segments[0]?.platform ?? null));
+    if (!channelId) {
+      throw new ValidationError(ti(lang, type === 'content' ? 'test.noContentChannel' : 'test.noLiveChannel'), type === 'content' ? 'contentChannelId' : 'liveChannelId');
+    }
+    if (!this.isReady()) throw new ValidationError(ti(lang, 'common.notReady'));
+
     const purpose = type === 'content' ? 'content' : 'live';
     const result = await this.notifier.send(guildId, channelId, purpose, (emojis) =>
-      asTestMessage(buildMessage(type, view, { emojis, avatarUrl: identity.avatarUrl, now })),
+      asTestMessage(buildMessage(type, view, { emojis, avatarUrl: identity.avatarUrl, now }), lang),
     );
-    if (!result.ok) {
-      throw new ValidationError(failureMessageAr(result, purpose, channelId) ?? 'ما قدرت أرسل الرسالة التجريبية، جرّب بعد شوي');
-    }
+    if (!result.ok) throw new ValidationError(failureMessage(result, purpose, channelId, lang) ?? ti(lang, 'test.failed'));
     // Callers audit with their own actor (dashboard route, /bot test).
     return result.ref;
   }
@@ -546,11 +692,6 @@ export class DiscordService implements DiscordApi {
   }
 
   // ───────────────────────────── helpers ─────────────────────────────
-
-  private sampleIdentity(): SampleIdentity {
-    const bot = this.botUser();
-    return { displayName: 'ستريمر تجريبي', discordUserId: bot?.id ?? '', avatarUrl: SAMPLE_AVATAR };
-  }
 
   /** Cached Discord avatar; a cache miss warms the member in the background for the next edit. */
   private avatarFor(guildId: string, userId: string): string | null {
